@@ -1,0 +1,48 @@
+ENV: PROD
+PROD:
+  DB: 
+    HOST:
+    PORT:
+    USERNAME:
+    PASS:
+    SCHEMA:
+  LOG:
+    PATH: 
+    NAME: 
+    LEVEL: 20 #INFO
+  SOCKET:
+    HOST: 'localhost'
+    PORT: 7497
+  NORGATE:
+    REMOTE_IP: '172.16.21.3'
+    REMOTE_PORT: 38890
+  SYMBOLS:
+    YFINANCE_ALL_US_STOCK_SYMBOLS  : 'symbols/yfinance_us_symbols.txt'
+    NORGATE_ALL_US_STOCK_SYMBOLS   : 'symbols/norgate_us_symbols.txt'
+    DATABASE_UPDATE_SYMBOLS        : 'symbols/all_us_stocks_symbols.txt'
+    DATABASE_UPDATE_ETF_SYMBOLS    : 'symbols/all_other_symbols.txt'
+  MARKET_ASSET_TYPES:
+    STOCK       : 'symbols/market_assets/stock.txt'
+    FOREX       : 'symbols/market_assets/forex.txt'
+    COMMODITY   : 'symbols/market_assets/commodity.txt'
+    INDEX       : 'symbols/market_assets/index.txt'
+    FUTURE      : 'symbols/market_assets/future.txt'
+    OPTION      : 'symbols/market_assets/option.txt'
+    CFD         : 'symbols/market_assets/cdf.txt'
+    BOND        : 'symbols/market_assets/bond.txt'
+    CRYPTO      : 'symbols/market_assets/crypto.txt'
+    
+  OPENAI:
+    API_KEY: "================skjZKbSnjnc27======================"      # Replace APIKEY
+
+TIMEFRAMES:
+  - '15 mins'
+  - '30 mins'
+  - '1 hour'
+  - '4 hours'
+
+DURATION_MAP:
+  '15 mins' : '14 D'
+  '30 mins' : '20 D'
+  '1 hour'  : '3 D'
+  '4 hours' : '50 D'
