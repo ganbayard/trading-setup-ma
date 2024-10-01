@@ -14,7 +14,7 @@ from PyQt5.QtCore import QObject
 
 from config import SOCKET, MARKET_ASSET_TYPES, TIMEFRAMES, DURATION_MAP
 from dotenv import load_dotenv
-from datetime import datetime
+import datetime
 import pytz
 
 load_dotenv()
@@ -64,7 +64,7 @@ class IBBaseLoader(BaseDataLoader):
         super().__init__(max_workers)
         self.ib = IB()
         self.connect_lock = asyncio.Lock()
-        self.loop = asyncio.get_event_loop() 
+        # No need to create a separate loop here
 
     def load_symbols(self) -> List[str]:
         file_path = MARKET_ASSET_TYPES.get(self.contract_type, '')
@@ -74,7 +74,7 @@ class IBBaseLoader(BaseDataLoader):
             return [symbol.strip() for symbol in f.read().strip().split(',')]
 
     def create_contract(self, symbol: str) -> Contract:
-        if   self.contract_type == 'STOCK':
+        if self.contract_type == 'STOCK':
             return Stock(symbol, 'SMART', 'USD')
         elif self.contract_type == 'OPTION':
             return Option(symbol, '20241026', 150, 'C', 'SMART')
@@ -101,7 +101,7 @@ class IBBaseLoader(BaseDataLoader):
                         self.ib.connectAsync(SOCKET['HOST'], SOCKET['PORT'], clientId=random.randint(1, 9999)),
                         timeout=10
                     )
-                    self.ib.reqMarketDataType(4)
+                    self.ib.reqMarketDataType(4) 
                 except asyncio.TimeoutError:
                     raise ConnectionError("Connection timeout")
                 except Exception as e:
@@ -137,37 +137,18 @@ class IBBaseLoader(BaseDataLoader):
             df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
             df['Volume'] = df['Volume'].replace(-1, float('nan'))
-            print(df.head()) 
+            print(df.head())  # Print the head of the DataFrame
             return df.sort_index()
 
         except Exception as e:
             logger.error(f"Failed to fetch data from IB for {symbol}: {str(e)}")
             return pd.DataFrame()
 
-
     def fetch_symbol_data(self, symbol, start_date, end_date, interval=TIMEFRAMES[0]):
-        return self.loop.run_in_executor(None, self.load_ib_data_worker, symbol, interval, end_date)
-
-    def load_ib_data_worker(self, symbol, interval, end_date): 
+        # Use asyncio.run within the thread
         return asyncio.run(self.load_ib_async_data(symbol, interval, end_date))
 
-    def load_data(self, start_date: str, end_date: str, intervals=None) -> Dict[str, pd.DataFrame]:
-        if intervals is None:
-            intervals = {symbol: TIMEFRAMES[0] for symbol in self.symbols}
-        results = {}
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_symbol = {executor.submit(self.fetch_symbol_data, symbol, start_date, end_date, intervals[symbol]): symbol for symbol in self.symbols}
-            for future in concurrent.futures.as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                try:
-                    results[symbol] = future.result()
-                    logger.info(f"Successfully loaded data for {symbol}")
-                except Exception as e:
-                    logger.error(f"Error loading data for {symbol}: {str(e)}")
-                    results[symbol] = None
-        return results
-
-    def disconnect(self):
+    async def disconnect(self):
         if self.ib.isConnected():
             self.ib.disconnect()
 
@@ -189,12 +170,12 @@ class BinanceCryptoLoader(BaseDataLoader):
             if symbol.endswith('USD') and symbol != 'USDT':
                 symbol = symbol[:-3] + 'USDT'
 
-            start_ts = int(datetime.strptime(start_date, "%Y%m%d").replace(tzinfo=pytz.UTC).timestamp() * 1000)
-            end_ts = int(datetime.strptime(end_date, "%Y%m%d").replace(tzinfo=pytz.UTC).timestamp() * 1000)
+            start_ts = int(datetime.datetime.strptime(start_date, "%Y%m%d").replace(tzinfo=pytz.UTC).timestamp() * 1000)
+            end_ts = int(datetime.datetime.strptime(end_date, "%Y%m%d").replace(tzinfo=pytz.UTC).timestamp() * 1000)
 
             klines = self.client.get_historical_klines(
                 symbol, 
-                BinanceClient.KLINE_INTERVAL_1DAY,
+                BinanceClient.KLINE_INTERVAL_1DAY, 
                 start_ts,
                 end_ts
             )
@@ -209,7 +190,7 @@ class BinanceCryptoLoader(BaseDataLoader):
             df = df[['open', 'high', 'low', 'close', 'volume']]
             df.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
             df = df.astype(float)
-            print(df.head())
+            print(df.head())  # Print the head of the DataFrame
             return df
         except Exception as e:
             logger.error(f"Failed to fetch data from Binance for {symbol}: {str(e)}")
@@ -229,7 +210,7 @@ def get_data_loader(asset_type: str) -> BaseDataLoader:
 async def main(): 
     loader = None
     try:
-        loader = get_data_loader('CRYPTO')
+        loader = get_data_loader('STOCK')
         data = loader.load_data('20230101', '20230930')
         
         success_count = 0
@@ -237,9 +218,12 @@ async def main():
         failure_count = 0
         
         for symbol, df in data.items():
-            if not df.empty:
-                print(f"{symbol}: {len(df)} rows")
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                print(f"{symbol}: {len(df)} rows") 
                 success_count += 1
+            elif df is None:
+                print(f"{symbol}: Failed to retrieve data")
+                failure_count += 1
             else:
                 print(f"{symbol}: No data available")
                 no_data_count += 1
@@ -259,8 +243,8 @@ async def main():
         print(f"An error occurred while running the script: {str(e)}")
     finally:
         if loader and isinstance(loader, IBBaseLoader):
-            asyncio.get_event_loop().run_until_complete(loader.disconnect())
+            await loader.disconnect()
         print("Script execution completed.")
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    asyncio.run(main())
