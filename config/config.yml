@@ -36,13 +36,19 @@ PROD:
     API_KEY: "================skjZKbSnjnc27======================"      # Replace APIKEY
 
 TIMEFRAMES:
+  - '5 mins'
   - '15 mins'
   - '30 mins'
   - '1 hour'
   - '4 hours'
+  - '1 day'
+  - '1 week'
 
 DURATION_MAP:
+  '5 mins'  : '10 D'
   '15 mins' : '14 D'
   '30 mins' : '20 D'
-  '1 hour'  : '3 D'
-  '4 hours' : '50 D'
+  '1 hour'  : '30 D'
+  '4 hours' : '60 D'
+  '1 day'   : '1 Y'
+  '1 week'  : '5 Y'
