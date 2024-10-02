@@ -1,52 +1,62 @@
-import random
 import logging
-import pandas as pd
 import mplfinance as mpf
-from datetime import timedelta
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg
 from lightweight_charts.widgets import QtChart
 
-import asyncio
+
 from ib_async import *
-import concurrent.futures
 
-
-from PyQt5.QtCore import QObject, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QVBoxLayout
+from PyQt5.QtCore import pyqtSignal, QTimer
 
-from config import SOCKET
+from config import TIMEFRAMES
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+
 class LightweightChart(QWidget):
+    timeframe_changed = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.main_layout = QVBoxLayout(self)
-
-        # Create chart
-        self.chart_widget = QWidget()
-        self.chart_layout = QHBoxLayout(self.chart_widget)
-        self.chart = QtChart(self.chart_widget, toolbox=True)
-        self.chart_layout.addWidget(self.chart.get_webview())
+        self.layout = QVBoxLayout(self)
+        self.chart = QtChart(toolbox=True)
+        self.chart.legend(True)
+        self.chart.topbar.textbox('symbol', '')
         
-        # Add chart to main layout
-        self.main_layout.addWidget(self.chart_widget)
+        chart_timeframes = [tf.replace(' ', '') for tf in TIMEFRAMES]
+        self.chart.topbar.switcher('timeframe', chart_timeframes, default=chart_timeframes[3])  # Default to '1day'
+        
+        self.layout.addWidget(self.chart.get_webview())
+        
+        self.current_timeframe = TIMEFRAMES[3]  # Default to '1 day'
+        
+        self.chart.topbar['timeframe'].func = self.on_timeframe_changed
+
+    def on_timeframe_changed(self, chart):
+        new_timeframe = self.chart.topbar['timeframe'].value
+        original_timeframe = next(tf for tf in TIMEFRAMES if tf.replace(' ', '') == new_timeframe)
+        if original_timeframe != self.current_timeframe:
+            self.current_timeframe = original_timeframe
+            self.timeframe_changed.emit(original_timeframe)
 
     def set(self, df, symbol):
+        if df is None or df.empty:
+            print(f"DataFrame is None or empty for {symbol}")
+            return
         try:
-            if df is None or df.empty:
-                logger.error(f"DataFrame is None or empty for {symbol}")
-                return
+            self.chart.topbar['symbol'].set(symbol)
             self.chart.set(df)
-            logger.info(f"Chart set successfully for {symbol}")
+            print(f"Chart set successfully for {symbol}")
         except Exception as e:
-            logger.error(f"Error in LightweightChart.set for {symbol}: {str(e)}")
+            print(f"Error setting chart for {symbol}: {str(e)}")
 
     def get_webview(self):
-        return self
+        return self.chart.get_webview()
+
 
 class NativeChart(FigureCanvasQTAgg):
     def __init__(self, parent=None, width=8, height=4, dpi=100, max_bars=300):
