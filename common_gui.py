@@ -71,15 +71,25 @@ class MainWindow(QMainWindow):
         self.load_data()
 
     def setup_ui(self):
+        self.setWindowTitle("Trading Setup MA Strategy")
+        self.resize(1600, 900)
+
+        # Main widget and layout
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
-        self.main_layout = QHBoxLayout()
+        self.main_layout = QHBoxLayout(self.main_widget)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+
+        # Create a splitter for the two main columns
         splitter = QSplitter(Qt.Horizontal)
-        
+
         # Column 1: Asset selector and table view
         column1_widget = QWidget()
         column1_layout = QVBoxLayout(column1_widget)
-        
+        column1_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Asset selector
         asset_selector_layout = QHBoxLayout()
         asset_selector_label = QLabel("Select Market Asset Type:")
         self.asset_selector = QComboBox()
@@ -88,14 +98,18 @@ class MainWindow(QMainWindow):
         asset_selector_layout.addWidget(asset_selector_label)
         asset_selector_layout.addWidget(self.asset_selector)
         column1_layout.addLayout(asset_selector_layout)
-        
+
+        # Search box
         self.search_box = QLineEdit(self)
         self.search_box.setPlaceholderText("Search...")
         self.search_box.returnPressed.connect(self.search)
         column1_layout.addWidget(self.search_box)
-        
+
+        # Table view
         self.table_view = QTableView()
         self.table_model = QStandardItemModel()
+        headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance"]
+        self.table_model.setHorizontalHeaderLabels(headers)
         self.proxy_model = QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.table_model)
         self.table_view.setModel(self.proxy_model)
@@ -106,31 +120,45 @@ class MainWindow(QMainWindow):
         self.table_view.verticalHeader().setVisible(False)
         self.table_view.doubleClicked.connect(self.on_table_double_click)
         self.table_view.clicked.connect(self.on_table_click)
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         column1_layout.addWidget(self.table_view)
-        
+
         # Column 2: Chart
         column2_widget = QWidget()
         column2_layout = QVBoxLayout(column2_widget)
-        
+        column2_layout.setContentsMargins(10, 10, 10, 10)
+
         self.chart = self.chart_type(self)
-        self.chart.setMinimumSize(400, 300)  # Set a minimum size for the chart
+        self.chart.setMinimumSize(400, 300)
         column2_layout.addWidget(self.chart)
-        
+
+        # Add columns to splitter
         splitter.addWidget(column1_widget)
         splitter.addWidget(column2_widget)
         splitter.setSizes([400, 1200])
+
+        # Add splitter to main layout
         self.main_layout.addWidget(splitter)
-        self.main_widget.setLayout(self.main_layout)
-        
+
+        # Set up asset selector connections
         self.asset_selector.setCurrentIndex(0)
         self.asset_selector.currentTextChanged.connect(self.on_asset_changed)
-        
+
+        # Status bar and progress bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat("Loading... %p%")
         self.progress_bar.setAlignment(Qt.AlignCenter)
         self.status_bar.addPermanentWidget(self.progress_bar)
+
+        # If using LightweightChart, connect the timeframe change signal
+        if isinstance(self.chart, LightweightChart):
+            self.chart.timeframe_changed.connect(self.on_timeframe_changed)
+            self.current_timeframe = self.chart.current_timeframe
+
+        # Center the window on the screen
+        self.center_on_screen()
 
     def load_symbols(self):
         self.symbols_by_asset = {}
@@ -160,7 +188,7 @@ class MainWindow(QMainWindow):
 
     def update_table(self, symbols):
         self.table_model.clear()
-        headers = ["Symbol", "Last Price", "Change", "Change %", "Volume"]
+        headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance", "Liquidity Status"]
         self.table_model.setHorizontalHeaderLabels(headers)
         for symbol in symbols:
             row_items = [QStandardItem(symbol)]
@@ -194,8 +222,8 @@ class MainWindow(QMainWindow):
 
     def load_data(self):
         end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")  # Load 30 days of data
-        
+        start_date = (datetime.now() - timedelta(days=65)).strftime("%Y%m%d")  # Load 1 year of data
+
         if self.data_loader_thread and self.data_loader_thread.isRunning():
             self.data_loader_thread.terminate()
             self.data_loader_thread.wait()
@@ -220,27 +248,59 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Error", f"Failed to load data: {error_message}")
         self.update_progress_bar("Data load failed", 0, 100)
 
+    def calculate_ma(self, df):
+        df['MA20'] = df['Close'].rolling(window=20).mean()
+        df['MA200'] = df['Close'].rolling(window=200).mean()
+        return df
+    
     def update_table_with_data(self, data=None):
         if data is None:
             data = self.assets
+        is_crypto = self.asset_selector.currentText().lower() == 'crypto'
+        decimal_places = 8 if is_crypto else 2
+
         for row in range(self.table_model.rowCount()):
             symbol = self.table_model.item(row, 0).text()
             if symbol in data:
                 df = data[symbol]
                 if isinstance(df, pd.DataFrame) and not df.empty:
+                    # Calculate MA20 and MA200
+                    df = self.calculate_ma(df)
+
                     last_close = df['Close'].iloc[-1]
                     prev_close = df['Close'].iloc[-2] if len(df) > 1 else last_close
                     change = last_close - prev_close
                     change_percent = (change / prev_close) * 100 if prev_close != 0 else 0
                     volume = df['Volume'].iloc[-1]
-                    
-                    self.table_model.setItem(row, 1, QStandardItem(f"{last_close:.2f}"))
-                    self.table_model.setItem(row, 2, QStandardItem(f"{change:.2f}"))
+
+                    # Find latest MA cross points for both support and resistance
+                    ma_cross_support, ma_cross_resistance = self.find_ma_cross_points(df)
+
+                    self.table_model.setItem(row, 1, QStandardItem(f"{last_close:.{decimal_places}f}"))
+                    self.table_model.setItem(row, 2, QStandardItem(f"{change:.{decimal_places}f}"))
                     self.table_model.setItem(row, 3, QStandardItem(f"{change_percent:.2f}%"))
                     self.table_model.setItem(row, 4, QStandardItem(f"{volume:.0f}"))
+                    self.table_model.setItem(row, 5, QStandardItem(f"{ma_cross_support:.{decimal_places}f}" if ma_cross_support is not None else "N/A"))
+                    self.table_model.setItem(row, 6, QStandardItem(f"{ma_cross_resistance:.{decimal_places}f}" if ma_cross_resistance is not None else "N/A"))
                 else:
-                    for col in range(1, 5):
+                    for col in range(1, 7):
                         self.table_model.setItem(row, col, QStandardItem("N/A"))
+
+
+    def find_ma_cross_points(self, df):
+        ma_cross_support = None
+        ma_cross_resistance = None
+        for i in range(len(df) - 1, 0, -1):
+            if df['MA20'].iloc[i] < df['MA200'].iloc[i] and df['MA20'].iloc[i-1] >= df['MA200'].iloc[i-1]:
+                if ma_cross_resistance is None:
+                    ma_cross_resistance = max(df['MA20'].iloc[i], df['MA200'].iloc[i])
+            elif df['MA20'].iloc[i] > df['MA200'].iloc[i] and df['MA20'].iloc[i-1] <= df['MA200'].iloc[i-1]:
+                if ma_cross_support is None:
+                    ma_cross_support = min(df['MA20'].iloc[i], df['MA200'].iloc[i])
+            
+            if ma_cross_support is not None and ma_cross_resistance is not None:
+                break
+        return ma_cross_support, ma_cross_resistance
 
     def on_timeframe_changed(self, new_timeframe):
         print(f"Timeframe changed to: {new_timeframe}")
@@ -291,19 +351,23 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(max_value)
 
     def update_chart_safely(self, df, symbol):
+        logger.info(f"Updating chart for {symbol}")
         if df is not None and not df.empty:
             try:
-                if not isinstance(df.index, pd.DatetimeIndex):
-                    df.index = pd.to_datetime(df.index)  
-                df = df.sort_index()             
+                df.index = pd.to_datetime(df.index)
+                df = df.sort_index()
+                # Calculate MA20 and MA200 here
+                df = self.calculate_ma(df)
+                logger.info(f"DataFrame prepared for {symbol}: {len(df)} rows")
                 self.chart.set(df, symbol)
-                logger.info(f"Successfully updated chart for {symbol}")
+                logger.info(f"Chart update called for {symbol}")
             except Exception as e:
-                logger.error(f"Error updating chart for {symbol}: {str(e)}")
+                logger.error(f"Error updating chart for {symbol}: {str(e)}", exc_info=True)
                 self.show_error_message(f"Error updating chart for {symbol}. Please try again or select a different timeframe.")
         else:
             logger.warning(f"Cannot update chart: Empty or None DataFrame for {symbol}")
             self.show_error_message(f"No data available to update chart for {symbol}. Please try a different timeframe or symbol.")
+
 
 
     def search(self):
