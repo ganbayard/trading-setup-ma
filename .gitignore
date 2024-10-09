@@ -173,7 +173,8 @@ TA_Lib-0.4.28-cp39-cp39-win_amd64.whl
 
 
 assets_20240628.pickle
-ib_price_bars.db
+market_assets.db
 *.db-journal
 *.csv
 data
+tests
