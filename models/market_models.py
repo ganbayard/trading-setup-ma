@@ -6,8 +6,27 @@ Base = declarative_base()
 class TimeframeType(Base):
     __tablename__ = 'timeframe_type'
 
-    id = sa.Column(sa.Integer, primary_key=True)
+    id   = sa.Column(sa.Integer, primary_key=True)
     name = sa.Column(sa.String, unique=True, nullable=False)
+
+class MarketAssetType(Base):
+    __tablename__ = 'market_asset_type'
+
+    id   = sa.Column(sa.Integer, primary_key=True)
+    name = sa.Column(sa.String, unique=True, nullable=False)
+
+class MaCrossTab(Base):
+    __tablename__ = 'ma_cross_tab'
+
+    id                  = sa.Column(sa.Integer, primary_key=True)
+    symbol              = sa.Column(sa.String, nullable=False)
+    market_assets_type  = sa.Column(sa.Integer, sa.ForeignKey('market_asset_type.id'), nullable=False)
+    timeframe_type      = sa.Column(sa.Integer, sa.ForeignKey('timeframe_type.id'), nullable=False)
+    ma_cross_resistance = sa.Column(sa.Float)
+    ma_cross_support    = sa.Column(sa.Float)
+    liquidity_status    = sa.Column(sa.String)
+
+    __table_args__ = (sa.UniqueConstraint('symbol', 'market_assets_type', 'timeframe_type'),)
 
 class StockMTFBar(Base):
     __tablename__ = 'stock_mtf_bar'
