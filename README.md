@@ -1,6 +1,10 @@
-# Trading setup MA Strategy
+# MA Trading Strategy
 
     MA Crossing Setup for Multiple Market Asset
+
+## Common Utils | common_utils.py
+
+    Liquidity Status Condition and Ma Crossing Calculator
 
 ## SQLite stuffs
 
@@ -20,3 +24,7 @@
     - Regularly back up database, especially before applying migrations in a production environment.
 
     alembic upgrade head
+
+## Update Market assets bar tables
+
+    Update Bar Data
