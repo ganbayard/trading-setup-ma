@@ -45,10 +45,10 @@ TIMEFRAMES:
   - '1 W'
 
 DURATION_MAP:
-  '5 mins'  : '10 D'
+  '5 mins'  : '7 D'
   '15 mins' : '14 D'
-  '30 mins' : '20 D'
+  '30 mins' : '26 D'
   '1 hour'  : '60 D'
-  '4 hours' : '120 D'
+  '4 hours' : '200 D'
   '1 day'   : '2 Y'
   '1 W'     : '10 Y'
