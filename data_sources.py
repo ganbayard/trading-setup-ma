@@ -198,8 +198,16 @@ class BinanceCryptoLoader(BaseDataLoader):
             start_ts = int(datetime.strptime(start_date, "%Y%m%d").replace(tzinfo=pytz.UTC).timestamp() * 1000)
             end_ts = int(datetime.strptime(end_date, "%Y%m%d").replace(tzinfo=pytz.UTC).timestamp() * 1000)
 
-            # Convert interval to Binance format
-            binance_interval = interval.replace(' mins', 'm').replace(' hour', 'h').replace(' day', 'd').replace('1 W', '1w')
+            binance_interval_map = {
+                '5 mins' : '5m',
+                '15 mins': '15m',
+                '30 mins': '30m',
+                '1 hour' : '1h',
+                '4 hours': '4h',
+                '1 day': '1d',
+                '1 W': '1w'
+            }
+            binance_interval = binance_interval_map.get(interval, interval)
 
             klines = self.client.get_historical_klines(
                 symbol, 
