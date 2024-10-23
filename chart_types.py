@@ -71,8 +71,8 @@ class LightweightChart(QWidget):
         """Initialize moving average lines."""
         try:
             # Create MA lines with proper names and colors
-            self.ma20_line = self.chart.create_line('MA20', color='#ff0000', width=1)
-            self.ma200_line = self.chart.create_line('MA200', color='#0000ff', width=1)
+            self.ma20_line  = self.chart.create_line('MA20', color='#00FF00', width=1, price_label=True, price_line = False)
+            self.ma200_line = self.chart.create_line('MA200', color='#FF0000', width=1, price_label=True, price_line = False )
             logger.info("Moving average lines initialized")
         except Exception as e:
             logger.error(f"Error initializing MA lines: {str(e)}")

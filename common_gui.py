@@ -49,7 +49,13 @@ class DataLoaderThread(QThread):
         self.symbols = symbols if isinstance(symbols, list) else [symbols] if symbols else None
         self.interval = interval
         self.days_back = days_back
+        self._is_running = True
         logger.info(f"DataLoaderThread initialized with interval: {self.interval}")
+
+    def stop(self):
+        """Safely stop the thread."""
+        self._is_running = False
+        self.wait()
 
     def get_timeframe_id(self, session, timeframe: str) -> int:
         try:
@@ -66,6 +72,9 @@ class DataLoaderThread(QThread):
 
     def fetch_market_data(self, session, model_class, timeframe_id: int):
         try:
+            if not self._is_running:
+                return {}
+
             end_date = datetime.now()
             start_date = end_date - timedelta(days=self.days_back)
 
@@ -88,7 +97,10 @@ class DataLoaderThread(QThread):
 
             data = {}
             for row in rows:
-                row = row[0]  # Get the actual model instance
+                if not self._is_running:
+                    return {}
+
+                row = row[0]
                 symbol = row.symbol
                 
                 if symbol not in data:
@@ -104,6 +116,9 @@ class DataLoaderThread(QThread):
                 })
 
             for symbol in data:
+                if not self._is_running:
+                    return {}
+
                 df = pd.DataFrame(data[symbol])
                 df.set_index('timestamp', inplace=True)
                 df.sort_index(inplace=True)
@@ -116,8 +131,9 @@ class DataLoaderThread(QThread):
             raise
 
     def run(self):
-        session = Session()
+        session = None
         try:
+            session = Session()
             self.progress_updated.emit("Loading data...", 0, 0)
             
             model_class = ASSET_MODEL_MAP.get(self.asset_type)
@@ -127,6 +143,9 @@ class DataLoaderThread(QThread):
             timeframe_id = self.get_timeframe_id(session, self.interval)
             results = self.fetch_market_data(session, model_class, timeframe_id)
             
+            if not self._is_running:
+                return
+
             if not results:
                 logger.warning(f"No data available for {self.asset_type} with timeframe {self.interval}")
                 self.error_occurred.emit(f"No data available for {self.asset_type}. Please update the database.")
@@ -136,10 +155,12 @@ class DataLoaderThread(QThread):
             self.progress_updated.emit("Data loaded", 0, 100)
 
         except Exception as e:
-            logger.error(f"Error in DataLoaderThread: {str(e)}")
-            self.error_occurred.emit(str(e))
+            if self._is_running:
+                logger.error(f"Error in DataLoaderThread: {str(e)}")
+                self.error_occurred.emit(str(e))
         finally:
-            session.close()
+            if session:
+                session.close()
 
 class UIUpdater(QObject):
     update_progress = pyqtSignal(str, int, int)
@@ -364,33 +385,46 @@ class MainWindow(QMainWindow):
             self.show_error_message(f"Data for {symbol} not loaded. Please try reloading the data.")
 
     def load_data(self):
-        if self.data_loader_thread and self.data_loader_thread.isRunning():
-            self.data_loader_thread.terminate()
-            self.data_loader_thread.wait()
+        """Load data for current asset type."""
+        try:
+            if self.data_loader_thread and self.data_loader_thread.isRunning():
+                self.data_loader_thread.stop()
+                self.data_loader_thread.wait()
+                self.data_loader_thread.deleteLater()
 
-        self.data_loader_thread = DataLoaderThread(
-            asset_type=self.current_asset_type,
-            interval=self.current_timeframe
-        )
-        self.data_loader_thread.data_loaded.connect(self.on_data_loaded)
-        self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
-        self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
-        self.data_loader_thread.start()
+            self.data_loader_thread = DataLoaderThread(
+                asset_type=self.current_asset_type,
+                interval=self.current_timeframe
+            )
+            self.data_loader_thread.data_loaded.connect(self.on_data_loaded)
+            self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
+            self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
+            self.data_loader_thread.start()
+        except Exception as e:
+            logger.error(f"Error in load_data: {str(e)}")
+            self.show_error_message(f"Failed to load data: {str(e)}")
 
     def load_data_for_symbol(self, symbol, timeframe):
-        if self.data_loader_thread and self.data_loader_thread.isRunning():
-            self.data_loader_thread.terminate()
-            self.data_loader_thread.wait()
+        """Load data for a specific symbol and timeframe."""
+        try:
+            if self.data_loader_thread and self.data_loader_thread.isRunning():
+                self.data_loader_thread.stop()
+                self.data_loader_thread.wait()
+                self.data_loader_thread.deleteLater()
 
-        self.data_loader_thread = DataLoaderThread(
-            asset_type=self.current_asset_type,
-            symbols=symbol,
-            interval=timeframe
-        )
-        self.data_loader_thread.data_loaded.connect(self.on_symbol_data_loaded)
-        self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
-        self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
-        self.data_loader_thread.start()
+            self.data_loader_thread = DataLoaderThread(
+                asset_type=self.current_asset_type,
+                symbols=symbol,
+                interval=timeframe
+            )
+            self.data_loader_thread.data_loaded.connect(self.on_symbol_data_loaded)
+            self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
+            self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
+            self.data_loader_thread.start()
+        except Exception as e:
+            logger.error(f"Error in load_data_for_symbol: {str(e)}")
+            self.show_error_message(f"Failed to load symbol data: {str(e)}")
+
 
     def on_data_loaded(self, data):
         self.assets = data
@@ -476,10 +510,16 @@ class MainWindow(QMainWindow):
         self.move(window_geometry.topLeft())
 
     def closeEvent(self, event):
-        if self.data_loader_thread and self.data_loader_thread.isRunning():
-            self.data_loader_thread.terminate()
-            self.data_loader_thread.wait()
-        super().closeEvent(event)
+        """Handle application close event."""
+        try:
+            if self.data_loader_thread and self.data_loader_thread.isRunning():
+                self.data_loader_thread.stop()
+                self.data_loader_thread.wait()
+                self.data_loader_thread.deleteLater()
+        except Exception as e:
+            logger.error(f"Error in closeEvent: {str(e)}")
+        finally:
+            super().closeEvent(event)
 
     def keyPressEvent(self, event):
         if self.table_view.hasFocus():
