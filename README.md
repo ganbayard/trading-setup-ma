@@ -28,3 +28,18 @@
 ## Update Market assets bar tables
 
     Update Bar Data
+    Update all asset types with default settings:
+    python update_market_asset_bar_ib.py
+
+    Update only FOREX data:
+    python update_market_asset_bar_ib.py --asset-type FOREX
+
+    Update specific symbols for STOCK:
+    bashCopypython update_market_asset_bar_ib.py --asset-type STOCK --symbols AAPL MSFT GOOGL
+
+    Update with specific timeframes:
+    python update_market_asset_bar_ib.py --asset-type COMMODITY --timeframes "1 hour" "4 hours"
+    
+    Update with custom look-back period:
+    python update_market_asset_bar_ib.py --asset-type FOREX --days-back 30
+
