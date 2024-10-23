@@ -1,3 +1,4 @@
+# common_utils.py
 import logging
 from datetime import datetime, timedelta
 import pandas as pd
@@ -30,25 +31,66 @@ ASSET_MODEL_MAP = {
 }
 
 def get_timeframe_type_id(session, timeframe: str) -> int:
-    """Get the timeframe type ID from the database."""
-    result = session.execute(
-        select(TimeframeType.id).where(TimeframeType.name == timeframe)
-    ).scalar_one_or_none()
-    return result
+    """Get the timeframe type ID with error handling."""
+    try:
+        result = session.execute(
+            select(TimeframeType.id).where(TimeframeType.name == timeframe)
+        ).scalar_one_or_none()
+        
+        if result is None:
+            logger.error(f"Timeframe {timeframe} not found in TimeframeType table")
+        
+        return result
+    except SQLAlchemyError as e:
+        logger.error(f"Database error while getting timeframe ID: {str(e)}")
+        return None
+
+def process_market_data(rows, symbol=None):
+    """Process and clean market data."""
+    try:
+        data = {}
+        for row in rows:
+            row = row[0]
+            symbol = row.symbol
+            
+            if symbol not in data:
+                data[symbol] = []
+            
+            # Ensure no None values in data
+            data[symbol].append({
+                'timestamp': row.timestamp,
+                'Open': row.open if row.open is not None else 0.0,
+                'High': row.high if row.high is not None else 0.0,
+                'Low': row.low if row.low is not None else 0.0,
+                'Close': row.close if row.close is not None else 0.0,
+                'Volume': row.volume if row.volume is not None else 0.0
+            })
+
+        for symbol in data:
+            df = pd.DataFrame(data[symbol])
+            df.set_index('timestamp', inplace=True)
+            df.sort_index(inplace=True)
+            
+            # Clean numeric data
+            numeric_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            for col in numeric_columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+            
+            # Fill NaN values
+            df['Volume'] = df['Volume'].fillna(0)
+            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].fillna(method='ffill')
+            
+            data[symbol] = df
+
+        return data
+    except Exception as e:
+        logger.error(f"Error processing market data: {str(e)}")
+        return {}
 
 def fetch_market_asset_data(asset_type: str, symbol: str = None, 
                           timeframe: str = '1 hour', days_back: int = 60):
     """
-    Fetch market asset data from the database.
-    
-    Args:
-        asset_type (str): Type of market asset (STOCK, FOREX, etc.)
-        symbol (str, optional): Specific symbol to fetch. If None, fetches all symbols.
-        timeframe (str): Timeframe to fetch data for
-        days_back (int): Number of days of historical data to fetch
-        
-    Returns:
-        dict: Dictionary mapping symbols to their DataFrame of historical data
+    Fetch market asset data with improved error handling and data cleaning.
     """
     session = Session()
     try:
@@ -81,60 +123,43 @@ def fetch_market_asset_data(asset_type: str, symbol: str = None,
         if not rows:
             logger.warning(f"No data found for {asset_type}" + 
                          (f" symbol {symbol}" if symbol else ""))
-            logger.warning(f"Please update the {asset_type.lower()}_mtf_bar table using the update script")
             return {}
 
-        data = {}
-        for row in rows:
-            row = row[0]
-            symbol = row.symbol
-            
-            if symbol not in data:
-                data[symbol] = []
-                
-            data[symbol].append({
-                'timestamp': row.timestamp,
-                'Open': row.open,
-                'High': row.high,
-                'Low': row.low,
-                'Close': row.close,
-                'Volume': row.volume
-            })
-
-        for symbol in data:
-            df = pd.DataFrame(data[symbol])
-            df.set_index('timestamp', inplace=True)
-            df.sort_index(inplace=True)
-            data[symbol] = df
-
-        return data
+        return process_market_data(rows, symbol)
 
     except SQLAlchemyError as e:
         logger.error(f"Database error while fetching {asset_type} data: {str(e)}")
+        return {}
+    except Exception as e:
+        logger.error(f"Unexpected error while fetching {asset_type} data: {str(e)}")
         return {}
     finally:
         session.close()
 
 def calculate_ma_cross(df):
-    """Calculate moving average crossover points."""
-    if df is None or df.empty:
-        return None, None
+    """Calculate moving average crossover points with error handling."""
+    try:
+        if df is None or df.empty:
+            return None, None
 
-    df['MA20'] = df['Close'].rolling(window=20).mean()
-    df['MA200'] = df['Close'].rolling(window=200).mean()
-    
-    ma_cross_support = None
-    ma_cross_resistance = None
-    
-    for i in range(len(df) - 1, 0, -1):
-        if df['MA20'].iloc[i] < df['MA200'].iloc[i] and df['MA20'].iloc[i-1] >= df['MA200'].iloc[i-1]:
-            if ma_cross_resistance is None:
-                ma_cross_resistance = max(df['MA20'].iloc[i], df['MA200'].iloc[i])
-        elif df['MA20'].iloc[i] > df['MA200'].iloc[i] and df['MA20'].iloc[i-1] <= df['MA200'].iloc[i-1]:
-            if ma_cross_support is None:
-                ma_cross_support = min(df['MA20'].iloc[i], df['MA200'].iloc[i])
+        df['MA20'] = df['Close'].rolling(window=20, min_periods=1).mean()
+        df['MA200'] = df['Close'].rolling(window=200, min_periods=1).mean()
         
-        if ma_cross_support is not None and ma_cross_resistance is not None:
-            break
+        ma_cross_support = None
+        ma_cross_resistance = None
+        
+        for i in range(len(df) - 1, 0, -1):
+            if df['MA20'].iloc[i] < df['MA200'].iloc[i] and df['MA20'].iloc[i-1] >= df['MA200'].iloc[i-1]:
+                if ma_cross_resistance is None:
+                    ma_cross_resistance = max(df['MA20'].iloc[i], df['MA200'].iloc[i])
+            elif df['MA20'].iloc[i] > df['MA200'].iloc[i] and df['MA20'].iloc[i-1] <= df['MA200'].iloc[i-1]:
+                if ma_cross_support is None:
+                    ma_cross_support = min(df['MA20'].iloc[i], df['MA200'].iloc[i])
+            
+            if ma_cross_support is not None and ma_cross_resistance is not None:
+                break
 
-    return ma_cross_support, ma_cross_resistance
+        return ma_cross_support, ma_cross_resistance
+    except Exception as e:
+        logger.error(f"Error calculating MA cross: {str(e)}")
+        return None, None

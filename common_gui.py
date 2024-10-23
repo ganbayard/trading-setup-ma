@@ -1,4 +1,5 @@
 import logging
+import threading
 import pandas as pd
 from datetime import datetime, timedelta
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -38,6 +39,7 @@ ASSET_MODEL_MAP = {
     'BOND': BondMTFBar
 }
 
+
 class DataLoaderThread(QThread):
     data_loaded = pyqtSignal(dict)
     progress_updated = pyqtSignal(str, int, int)
@@ -50,14 +52,17 @@ class DataLoaderThread(QThread):
         self.interval = interval
         self.days_back = days_back
         self._is_running = True
+        self._lock = threading.Lock()
         logger.info(f"DataLoaderThread initialized with interval: {self.interval}")
 
     def stop(self):
         """Safely stop the thread."""
-        self._is_running = False
+        with self._lock:
+            self._is_running = False
         self.wait()
 
     def get_timeframe_id(self, session, timeframe: str) -> int:
+        """Get timeframe ID with error handling."""
         try:
             result = session.execute(
                 select(TimeframeType.id).where(TimeframeType.name == timeframe)
@@ -70,7 +75,28 @@ class DataLoaderThread(QThread):
             logger.error(f"Database error while getting timeframe ID: {str(e)}")
             raise
 
+    def clean_market_data(self, df):
+        """Clean market data with proper error handling."""
+        try:
+            if df is None or df.empty:
+                return df
+
+            # Clean numeric columns
+            numeric_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+            for col in numeric_columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # Fill NaN values
+            df['Volume'] = df['Volume'].fillna(0)
+            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].fillna(method='ffill')
+
+            return df
+        except Exception as e:
+            logger.error(f"Error cleaning market data: {str(e)}")
+            return df
+
     def fetch_market_data(self, session, model_class, timeframe_id: int):
+        """Fetch market data with improved error handling."""
         try:
             if not self._is_running:
                 return {}
@@ -105,14 +131,15 @@ class DataLoaderThread(QThread):
                 
                 if symbol not in data:
                     data[symbol] = []
-                    
+                
+                # Ensure no None values
                 data[symbol].append({
                     'timestamp': row.timestamp,
-                    'Open': row.open,
-                    'High': row.high,
-                    'Low': row.low,
-                    'Close': row.close,
-                    'Volume': row.volume
+                    'Open': row.open if row.open is not None else 0.0,
+                    'High': row.high if row.high is not None else 0.0,
+                    'Low': row.low if row.low is not None else 0.0,
+                    'Close': row.close if row.close is not None else 0.0,
+                    'Volume': row.volume if row.volume is not None else 0.0
                 })
 
             for symbol in data:
@@ -122,37 +149,40 @@ class DataLoaderThread(QThread):
                 df = pd.DataFrame(data[symbol])
                 df.set_index('timestamp', inplace=True)
                 df.sort_index(inplace=True)
+                df = self.clean_market_data(df)
                 data[symbol] = df
 
             return data
 
-        except SQLAlchemyError as e:
-            logger.error(f"Database error while fetching market data: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error fetching market data: {str(e)}")
             raise
 
     def run(self):
+        """Run thread with improved error handling and data cleaning."""
         session = None
         try:
-            session = Session()
-            self.progress_updated.emit("Loading data...", 0, 0)
-            
-            model_class = ASSET_MODEL_MAP.get(self.asset_type)
-            if not model_class:
-                raise ValueError(f"Unsupported asset type: {self.asset_type}")
-
-            timeframe_id = self.get_timeframe_id(session, self.interval)
-            results = self.fetch_market_data(session, model_class, timeframe_id)
-            
-            if not self._is_running:
-                return
-
-            if not results:
-                logger.warning(f"No data available for {self.asset_type} with timeframe {self.interval}")
-                self.error_occurred.emit(f"No data available for {self.asset_type}. Please update the database.")
-            else:
-                self.data_loaded.emit(results)
+            with self._lock:
+                session = Session()
+                self.progress_updated.emit("Loading data...", 0, 0)
                 
-            self.progress_updated.emit("Data loaded", 0, 100)
+                model_class = ASSET_MODEL_MAP.get(self.asset_type)
+                if not model_class:
+                    raise ValueError(f"Unsupported asset type: {self.asset_type}")
+
+                timeframe_id = self.get_timeframe_id(session, self.interval)
+                results = self.fetch_market_data(session, model_class, timeframe_id)
+                
+                if not self._is_running:
+                    return
+
+                if not results:
+                    logger.warning(f"No data available for {self.asset_type}")
+                    self.error_occurred.emit(f"No data available for {self.asset_type}. Please update the database.")
+                else:
+                    self.data_loaded.emit(results)
+                
+                self.progress_updated.emit("Data loaded", 0, 100)
 
         except Exception as e:
             if self._is_running:
@@ -161,7 +191,6 @@ class DataLoaderThread(QThread):
         finally:
             if session:
                 session.close()
-
 class UIUpdater(QObject):
     update_progress = pyqtSignal(str, int, int)
     update_chart = pyqtSignal(object, str)
@@ -332,6 +361,8 @@ class MainWindow(QMainWindow):
         return ma_cross_support, ma_cross_resistance
 
     def update_table_with_data(self, data=None):
+        """Update table with improved error handling."""
+        try:
             if data is None:
                 data = self.assets
             is_crypto = self.asset_selector.currentText().lower() == 'crypto'
@@ -352,15 +383,26 @@ class MainWindow(QMainWindow):
 
                         ma_cross_support, ma_cross_resistance = self.find_ma_cross_points(df)
 
-                        self.table_model.setItem(row, 1, QStandardItem(f"{last_close:.{decimal_places}f}"))
-                        self.table_model.setItem(row, 2, QStandardItem(f"{change:.{decimal_places}f}"))
-                        self.table_model.setItem(row, 3, QStandardItem(f"{change_percent:.2f}%"))
-                        self.table_model.setItem(row, 4, QStandardItem(f"{volume:.0f}"))
-                        self.table_model.setItem(row, 5, QStandardItem(f"{ma_cross_support:.{decimal_places}f}" if ma_cross_support is not None else "N/A"))
-                        self.table_model.setItem(row, 6, QStandardItem(f"{ma_cross_resistance:.{decimal_places}f}" if ma_cross_resistance is not None else "N/A"))
+                        # Set items with proper formatting and error checking
+                        def set_table_item(col, value, format_str):
+                            try:
+                                formatted_value = format_str.format(value) if value is not None else "N/A"
+                                self.table_model.setItem(row, col, QStandardItem(formatted_value))
+                            except Exception as e:
+                                logger.error(f"Error setting table item: {str(e)}")
+                                self.table_model.setItem(row, col, QStandardItem("N/A"))
+
+                        set_table_item(1, last_close, f"{{:.{decimal_places}f}}")
+                        set_table_item(2, change, f"{{:.{decimal_places}f}}")
+                        set_table_item(3, change_percent, "{:.2f}%")
+                        set_table_item(4, volume, "{:.0f}")
+                        set_table_item(5, ma_cross_support, f"{{:.{decimal_places}f}}")
+                        set_table_item(6, ma_cross_resistance, f"{{:.{decimal_places}f}}")
                     else:
                         for col in range(1, 7):
                             self.table_model.setItem(row, col, QStandardItem("N/A"))
+        except Exception as e:
+            logger.error(f"Error updating table with data: {str(e)}")
 
     def on_table_click(self, index):
         symbol = self.proxy_model.data(self.proxy_model.index(index.row(), 0))
@@ -427,10 +469,16 @@ class MainWindow(QMainWindow):
 
 
     def on_data_loaded(self, data):
-        self.assets = data
-        self.update_table_with_data(data)
-        self.update_progress_bar("Data loaded", 0, 100)
-        logger.info("Data loaded and table updated")
+        """Handle loaded data with improved error handling."""
+        try:
+            self.assets = data
+            self.update_table_with_data(data)
+            self.update_progress_bar("Data loaded", 0, 100)
+            logger.info("Data loaded and table updated")
+        except Exception as e:
+            logger.error(f"Error handling loaded data: {str(e)}")
+            self.show_error_message("Failed to process loaded data")
+
 
     def on_symbol_data_loaded(self, data):
         if self.current_symbol in data:
@@ -480,19 +528,24 @@ class MainWindow(QMainWindow):
             self.show_error_message(f"No data available to update chart for {symbol}. Please try a different timeframe or symbol.")
 
     def on_timeframe_changed(self, new_timeframe):
-        """Handle timeframe changes from the chart."""
+        """Handle timeframe changes with improved error handling."""
         try:
             logger.info(f"MainWindow received timeframe change: {new_timeframe}")
             if new_timeframe != self.current_timeframe:
                 self.current_timeframe = new_timeframe
                 if self.current_symbol and self.current_asset_type:
                     logger.info(f"Loading new data for {self.current_symbol} with timeframe {new_timeframe}")
+                    # Stop any existing data loader thread
+                    if self.data_loader_thread and self.data_loader_thread.isRunning():
+                        self.data_loader_thread.stop()
+                        self.data_loader_thread.wait()
                     self.load_data_for_symbol(self.current_symbol, new_timeframe)
                 else:
                     logger.warning("No symbol or asset type selected for timeframe change")
         except Exception as e:
             logger.error(f"Error handling timeframe change in MainWindow: {str(e)}")
             self.show_error_message(f"Failed to update timeframe: {str(e)}")
+
 
     def search(self):
         search_term = self.search_box.text().lower()
@@ -510,7 +563,7 @@ class MainWindow(QMainWindow):
         self.move(window_geometry.topLeft())
 
     def closeEvent(self, event):
-        """Handle application close event."""
+        """Handle application close event with improved cleanup."""
         try:
             if self.data_loader_thread and self.data_loader_thread.isRunning():
                 self.data_loader_thread.stop()
