@@ -227,6 +227,10 @@ class MainWindow(QMainWindow):
         self.setup_ui()
         self.load_symbols()
 
+        self._loading_lock = threading.Lock()
+        self._chart_update_lock = threading.Lock()
+
+
     def setup_ui(self):
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
@@ -447,25 +451,49 @@ class MainWindow(QMainWindow):
             self.show_error_message(f"Failed to load data: {str(e)}")
 
     def load_data_for_symbol(self, symbol, timeframe):
-        """Load data for a specific symbol and timeframe."""
+        """Load data for a specific symbol and timeframe with improved synchronization."""
         try:
-            if self.data_loader_thread and self.data_loader_thread.isRunning():
-                self.data_loader_thread.stop()
-                self.data_loader_thread.wait()
-                self.data_loader_thread.deleteLater()
+            with self._loading_lock:
+                # Reset chart before loading new data
+                with self._chart_update_lock:
+                    if hasattr(self, 'chart') and self.chart:
+                        self.chart.reset_chart()
+                
+                # Clean up existing thread if running
+                if self.data_loader_thread and self.data_loader_thread.isRunning():
+                    self.data_loader_thread.stop()
+                    self.data_loader_thread.wait()
+                    self.data_loader_thread.deleteLater()
 
-            self.data_loader_thread = DataLoaderThread(
-                asset_type=self.current_asset_type,
-                symbols=symbol,
-                interval=timeframe
-            )
-            self.data_loader_thread.data_loaded.connect(self.on_symbol_data_loaded)
-            self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
-            self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
-            self.data_loader_thread.start()
+                # Create and start new thread
+                self.data_loader_thread = DataLoaderThread(
+                    asset_type=self.current_asset_type,
+                    symbols=symbol,
+                    interval=timeframe
+                )
+                
+                # Connect signals
+                self.data_loader_thread.data_loaded.connect(self.on_symbol_data_loaded)
+                self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
+                self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
+                
+                self.data_loader_thread.start()
+                
         except Exception as e:
             logger.error(f"Error in load_data_for_symbol: {str(e)}")
             self.show_error_message(f"Failed to load symbol data: {str(e)}")
+
+
+    def on_data_load_finished(self):
+        """Handle completion of data loading."""
+        try:
+            with self._loading_lock:
+                if self.data_loader_thread:
+                    self.data_loader_thread.deleteLater()
+                    self.data_loader_thread = None
+                self.update_progress_bar("Data load complete", 0, 100)
+        except Exception as e:
+            logger.error(f"Error in on_data_load_finished: {str(e)}")
 
 
     def on_data_loaded(self, data):
@@ -481,20 +509,33 @@ class MainWindow(QMainWindow):
 
 
     def on_symbol_data_loaded(self, data):
-        if self.current_symbol in data:
-            df = data[self.current_symbol]
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                self.update_chart_safely(df, self.current_symbol)
-                self.update_table_with_data({self.current_symbol: df})
-            else:
-                logger.warning(f"Empty DataFrame for symbol: {self.current_symbol}")
-                self.show_error_message(f"No data available for {self.current_symbol} with the selected timeframe. Try a different timeframe or symbol.")
-                self.update_table_with_data({self.current_symbol: None})
-        else:
-            logger.warning(f"No data available for symbol: {self.current_symbol}")
-            self.show_error_message(f"Failed to load data for {self.current_symbol}. Please try again later or select a different symbol.")
-            self.update_table_with_data({self.current_symbol: None})
-
+        """Handle loaded symbol data with improved error handling."""
+        try:
+            with self._loading_lock:
+                if self.current_symbol in data:
+                    df = data[self.current_symbol]
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        # Update chart first
+                        self.update_chart_safely(df, self.current_symbol)
+                        # Then update table
+                        self.update_table_with_data({self.current_symbol: df})
+                    else:
+                        logger.warning(f"Empty DataFrame for symbol: {self.current_symbol}")
+                        self.show_error_message(
+                            f"No data available for {self.current_symbol} with the selected timeframe. "
+                            "Try a different timeframe or symbol."
+                        )
+                        self.update_table_with_data({self.current_symbol: None})
+                else:
+                    logger.warning(f"No data available for symbol: {self.current_symbol}")
+                    self.show_error_message(
+                        f"Failed to load data for {self.current_symbol}. "
+                        "Please try again later or select a different symbol."
+                    )
+                    self.update_table_with_data({self.current_symbol: None})
+        except Exception as e:
+            logger.error(f"Error processing loaded symbol data: {str(e)}")
+            self.show_error_message("Error processing loaded data")
     def on_data_load_error(self, error_message):
         QMessageBox.critical(self, "Error", f"Failed to load data: {error_message}")
         self.update_progress_bar("Data load failed", 0, 100)
@@ -511,6 +552,7 @@ class MainWindow(QMainWindow):
             self.progress_bar.setValue(max_value)
 
     def update_chart_safely(self, df, symbol):
+        """Update chart with improved synchronization and error handling."""
         logger.info(f"Updating chart for {symbol}")
         if df is not None and not df.empty:
             try:
@@ -528,23 +570,61 @@ class MainWindow(QMainWindow):
             self.show_error_message(f"No data available to update chart for {symbol}. Please try a different timeframe or symbol.")
 
     def on_timeframe_changed(self, new_timeframe):
-        """Handle timeframe changes with improved error handling."""
+        """Handle timeframe changes with improved synchronization and validation."""
         try:
-            logger.info(f"MainWindow received timeframe change: {new_timeframe}")
-            if new_timeframe != self.current_timeframe:
-                self.current_timeframe = new_timeframe
-                if self.current_symbol and self.current_asset_type:
-                    logger.info(f"Loading new data for {self.current_symbol} with timeframe {new_timeframe}")
-                    # Stop any existing data loader thread
-                    if self.data_loader_thread and self.data_loader_thread.isRunning():
-                        self.data_loader_thread.stop()
-                        self.data_loader_thread.wait()
-                    self.load_data_for_symbol(self.current_symbol, new_timeframe)
-                else:
-                    logger.warning("No symbol or asset type selected for timeframe change")
+            with self._loading_lock:
+                logger.info(f"MainWindow received timeframe change: {new_timeframe}")
+                
+                # Validate timeframe change
+                if new_timeframe not in TIMEFRAMES:
+                    logger.error(f"Invalid timeframe received: {new_timeframe}")
+                    return
+                
+                if new_timeframe != self.current_timeframe:
+                    old_timeframe = self.current_timeframe
+                    self.current_timeframe = new_timeframe
+                    
+                    # Clean up existing data and chart
+                    self.cleanup_before_timeframe_change()
+                    
+                    if self.current_symbol and self.current_asset_type:
+                        logger.info(f"Loading new data for {self.current_symbol} with timeframe {new_timeframe}")
+                        self.load_data_for_symbol(self.current_symbol, new_timeframe)
+                    else:
+                        # Reload all data with new timeframe
+                        self.load_data()
+                        
+                    logger.info(f"Timeframe changed from {old_timeframe} to {new_timeframe}")
         except Exception as e:
             logger.error(f"Error handling timeframe change in MainWindow: {str(e)}")
             self.show_error_message(f"Failed to update timeframe: {str(e)}")
+
+    def cleanup_before_timeframe_change(self):
+        """Clean up resources before timeframe change with improved synchronization."""
+        try:
+            with self._loading_lock:
+                # Stop any running data loader thread
+                if self.data_loader_thread and self.data_loader_thread.isRunning():
+                    logger.info("Stopping existing data loader thread")
+                    self.data_loader_thread.stop()
+                    self.data_loader_thread.wait()
+                    self.data_loader_thread.deleteLater()
+                    self.data_loader_thread = None
+
+                # Reset chart data
+                with self._chart_update_lock:
+                    if hasattr(self, 'chart') and self.chart:
+                        logger.info("Resetting chart data")
+                        self.chart.reset_chart()
+
+                # Clear existing data
+                self.assets = {}
+                
+                # Update UI to show loading state
+                self.update_progress_bar("Loading new timeframe data...", 0, 0)
+                
+        except Exception as e:
+            logger.error(f"Error during cleanup: {str(e)}")
 
 
     def search(self):
