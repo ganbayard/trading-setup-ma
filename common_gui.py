@@ -39,7 +39,29 @@ ASSET_MODEL_MAP = {
     'BOND': BondMTFBar
 }
 
+class NumericSortProxyModel(QSortFilterProxyModel):
+    def lessThan(self, left, right):
+        left_data = self.sourceModel().data(left, Qt.UserRole)
+        right_data = self.sourceModel().data(right, Qt.UserRole)
 
+        try:
+            # Handle None/NaN values
+            if pd.isna(left_data):
+                return False
+            if pd.isna(right_data):
+                return True
+
+            # Handle numeric values
+            if isinstance(left_data, (int, float)) and isinstance(right_data, (int, float)):
+                return float(left_data) < float(right_data)
+
+            # Try converting strings to float for comparison
+            try:
+                return float(str(left_data).replace('%', '')) < float(str(right_data).replace('%', ''))
+            except ValueError:
+                return str(left_data) < str(right_data)
+        except Exception:
+            return str(left_data) < str(right_data)
 class DataLoaderThread(QThread):
     data_loaded = pyqtSignal(dict)
     progress_updated = pyqtSignal(str, int, int)
@@ -266,7 +288,7 @@ class MainWindow(QMainWindow):
         self.table_model = QStandardItemModel()
         headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance"]
         self.table_model.setHorizontalHeaderLabels(headers)
-        self.proxy_model = QSortFilterProxyModel()
+        self.proxy_model = NumericSortProxyModel(self)
         self.proxy_model.setSourceModel(self.table_model)
         self.table_view.setModel(self.proxy_model)
         self.table_view.setSortingEnabled(True)
@@ -365,7 +387,7 @@ class MainWindow(QMainWindow):
         return ma_cross_support, ma_cross_resistance
 
     def update_table_with_data(self, data=None):
-        """Update table with improved error handling."""
+        """Update table with improved number handling."""
         try:
             if data is None:
                 data = self.assets
@@ -387,15 +409,26 @@ class MainWindow(QMainWindow):
 
                         ma_cross_support, ma_cross_resistance = self.find_ma_cross_points(df)
 
-                        # Set items with proper formatting and error checking
+                        # Set items with both display and sort roles
                         def set_table_item(col, value, format_str):
                             try:
-                                formatted_value = format_str.format(value) if value is not None else "N/A"
-                                self.table_model.setItem(row, col, QStandardItem(formatted_value))
+                                if value is None:
+                                    formatted_value = "N/A"
+                                    sort_value = float('-inf')
+                                else:
+                                    formatted_value = format_str.format(value)
+                                    sort_value = float(value)
+
+                                item = QStandardItem(formatted_value)
+                                item.setData(sort_value, Qt.UserRole)
+                                self.table_model.setItem(row, col, item)
                             except Exception as e:
                                 logger.error(f"Error setting table item: {str(e)}")
-                                self.table_model.setItem(row, col, QStandardItem("N/A"))
+                                item = QStandardItem("N/A")
+                                item.setData(float('-inf'), Qt.UserRole)
+                                self.table_model.setItem(row, col, item)
 
+                        # Set numeric columns with proper formatting
                         set_table_item(1, last_close, f"{{:.{decimal_places}f}}")
                         set_table_item(2, change, f"{{:.{decimal_places}f}}")
                         set_table_item(3, change_percent, "{:.2f}%")
@@ -404,7 +437,9 @@ class MainWindow(QMainWindow):
                         set_table_item(6, ma_cross_resistance, f"{{:.{decimal_places}f}}")
                     else:
                         for col in range(1, 7):
-                            self.table_model.setItem(row, col, QStandardItem("N/A"))
+                            item = QStandardItem("N/A")
+                            item.setData(float('-inf'), Qt.UserRole)
+                            self.table_model.setItem(row, col, item)
         except Exception as e:
             logger.error(f"Error updating table with data: {str(e)}")
 
@@ -600,7 +635,7 @@ class MainWindow(QMainWindow):
             self.show_error_message(f"Failed to update timeframe: {str(e)}")
 
     def cleanup_before_timeframe_change(self):
-        """Clean up resources before timeframe change with improved synchronization."""
+        """Clean up resources before timeframe change."""
         try:
             with self._loading_lock:
                 # Stop any running data loader thread
@@ -617,9 +652,6 @@ class MainWindow(QMainWindow):
                         logger.info("Resetting chart data")
                         self.chart.reset_chart()
 
-                # Clear existing data
-                self.assets = {}
-                
                 # Update UI to show loading state
                 self.update_progress_bar("Loading new timeframe data...", 0, 0)
                 
