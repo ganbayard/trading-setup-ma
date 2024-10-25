@@ -62,6 +62,7 @@ class NumericSortProxyModel(QSortFilterProxyModel):
                 return str(left_data) < str(right_data)
         except Exception:
             return str(left_data) < str(right_data)
+
 class DataLoaderThread(QThread):
     data_loaded = pyqtSignal(dict)
     progress_updated = pyqtSignal(str, int, int)
@@ -108,9 +109,9 @@ class DataLoaderThread(QThread):
             for col in numeric_columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-            # Fill NaN values
+            # Fill NaN values using ffill() instead of fillna(method='ffill')
             df['Volume'] = df['Volume'].fillna(0)
-            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].fillna(method='ffill')
+            df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].ffill()
 
             return df
         except Exception as e:
@@ -213,257 +214,243 @@ class DataLoaderThread(QThread):
         finally:
             if session:
                 session.close()
+
 class UIUpdater(QObject):
     update_progress = pyqtSignal(str, int, int)
     update_chart = pyqtSignal(object, str)
 
 class MainWindow(QMainWindow):
     def __init__(self, chart_type=None):
-        super(MainWindow, self).__init__()
+        super().__init__()
         self.setWindowTitle("Market Asset Viewer")
         self.resize(1600, 900)
-        self.center_on_screen()
         
-        # Set chart type
+        # Initialize state
         self.chart_type = chart_type or LightweightChart
-        self.chart = self.chart_type(self)
-        
-        # Initialize default values
         self.current_timeframe = TIMEFRAMES[3]  # Default to '1 hour'
-        if isinstance(self.chart, LightweightChart):
-            self.chart.timeframe_changed.connect(self.on_timeframe_changed)
-            self.current_timeframe = self.chart.current_timeframe
-            
-        # Initialize other attributes
-        self.assets = {}
         self.current_symbol = None
         self.current_asset_type = None
+        self.assets = {}
         self.data_loader_thread = None
+        self.timeframe_data_cache = {}
+        
+        # Set up thread safety
+        self._loading_lock = threading.Lock()
+        self._chart_update_lock = threading.Lock()
+        
+        # Set up UI
+        self.setup_ui()
+        self.load_symbols()
         
         # Set up UI updater
         self.ui_updater = UIUpdater()
         self.ui_updater.update_progress.connect(self.update_progress_bar)
         self.ui_updater.update_chart.connect(self.update_chart_safely)
         
-        # Set up UI
-        self.setup_ui()
-        self.load_symbols()
-
-        self._loading_lock = threading.Lock()
-        self._chart_update_lock = threading.Lock()
-
+        # Connect chart signals if using LightweightChart
+        if isinstance(self.chart, LightweightChart):
+            self.chart.timeframe_changed.connect(self.on_timeframe_changed)
+            self.current_timeframe = self.chart.current_timeframe
+            
+        self.center_on_screen()
 
     def setup_ui(self):
+        # Main widget setup
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
         self.main_layout = QHBoxLayout(self.main_widget)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
+        # Create splitter for layout
         splitter = QSplitter(Qt.Horizontal)
 
-        # Column 1: Asset selector and table view
-        column1_widget = QWidget()
-        column1_layout = QVBoxLayout(column1_widget)
-        column1_layout.setContentsMargins(10, 10, 10, 10)
+        # Setup left column (asset selector and table)
+        self.setup_left_column(splitter)
+        
+        # Setup right column (chart)
+        self.setup_right_column(splitter)
+
+        # Add splitter to main layout
+        splitter.setSizes([400, 1200])
+        self.main_layout.addWidget(splitter)
+
+        # Setup status bar
+        self.setup_status_bar()
+
+    def setup_left_column(self, splitter):
+        # Create left column widget
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(10, 10, 10, 10)
 
         # Asset selector
-        asset_selector_layout = QHBoxLayout()
-        asset_selector_label = QLabel("Select Market Asset Type:")
+        self.setup_asset_selector(left_layout)
+
+        # Search box
+        self.setup_search_box(left_layout)
+
+        # Table view
+        self.setup_table_view(left_layout)
+
+        splitter.addWidget(left_widget)
+
+    def setup_right_column(self, splitter):
+        # Create right column widget
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(10, 10, 10, 10)
+
+        # Chart
+        self.chart = self.chart_type(self)
+        self.chart.setMinimumSize(800, 600)
+        right_layout.addWidget(self.chart)
+
+        splitter.addWidget(right_widget)
+
+    def setup_asset_selector(self, parent_layout):
+        selector_layout = QHBoxLayout()
+        selector_label = QLabel("Select Market Asset Type:")
         self.asset_selector = QComboBox()
         asset_types = list(MARKET_ASSET_TYPES.keys())
         self.asset_selector.addItems([asset_type.lower() for asset_type in asset_types])
-        asset_selector_layout.addWidget(asset_selector_label)
-        asset_selector_layout.addWidget(self.asset_selector)
-        column1_layout.addLayout(asset_selector_layout)
+        self.asset_selector.currentTextChanged.connect(self.on_asset_changed)
+        
+        selector_layout.addWidget(selector_label)
+        selector_layout.addWidget(self.asset_selector)
+        parent_layout.addLayout(selector_layout)
 
-        # Search box
+    def setup_search_box(self, parent_layout):
         self.search_box = QLineEdit(self)
         self.search_box.setPlaceholderText("Search...")
         self.search_box.returnPressed.connect(self.search)
-        column1_layout.addWidget(self.search_box)
+        parent_layout.addWidget(self.search_box)
 
-        # Table view
+    def setup_table_view(self, parent_layout):
         self.table_view = QTableView()
         self.table_model = QStandardItemModel()
         headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance"]
         self.table_model.setHorizontalHeaderLabels(headers)
+        
+        # Setup proxy model for sorting
         self.proxy_model = NumericSortProxyModel(self)
         self.proxy_model.setSourceModel(self.table_model)
+        
+        # Configure table view
         self.table_view.setModel(self.proxy_model)
         self.table_view.setSortingEnabled(True)
         self.table_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_view.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table_view.verticalHeader().setVisible(False)
+        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        
+        # Connect signals
         self.table_view.doubleClicked.connect(self.on_table_double_click)
         self.table_view.clicked.connect(self.on_table_click)
-        self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        column1_layout.addWidget(self.table_view)
+        
+        parent_layout.addWidget(self.table_view)
 
-        # Column 2: Chart
-        column2_widget = QWidget()
-        column2_layout = QVBoxLayout(column2_widget)
-        column2_layout.setContentsMargins(10, 10, 10, 10)
-
-        self.chart = self.chart_type(self)
-        self.chart.setMinimumSize(400, 300)
-        column2_layout.addWidget(self.chart)
-
-        # Add columns to splitter
-        splitter.addWidget(column1_widget)
-        splitter.addWidget(column2_widget)
-        splitter.setSizes([400, 1200])
-
-        self.main_layout.addWidget(splitter)
-
-        self.asset_selector.setCurrentIndex(0)
-        self.asset_selector.currentTextChanged.connect(self.on_asset_changed)
-
-        # Status bar and progress bar
+    def setup_status_bar(self):
         self.status_bar = QStatusBar()
-        self.setStatusBar(self.status_bar)
         self.progress_bar = QProgressBar()
         self.progress_bar.setFormat("Loading... %p%")
         self.progress_bar.setAlignment(Qt.AlignCenter)
         self.status_bar.addPermanentWidget(self.progress_bar)
-
-        self.center_on_screen()
+        self.setStatusBar(self.status_bar)
 
     def load_symbols(self):
+        """Load symbols for all asset types."""
         self.symbols_by_asset = {}
         for asset_type, file_name in MARKET_ASSET_TYPES.items():
-            file_path = file_name
-            self.symbols_by_asset[asset_type.lower()] = self.load_symbols_from_file(file_path)
-
-    def load_symbols_from_file(self, file_path):
-        try:
-            with open(file_path, 'r') as f:
-                content = f.read().strip()
-                symbols = [symbol.strip() for symbol in content.split(',') if symbol.strip()]
-            return symbols
-        except IOError:
-            logger.error(f"Unable to read symbol file: {file_path}")
-            return []
+            try:
+                with open(file_name, 'r') as f:
+                    content = f.read().strip()
+                    self.symbols_by_asset[asset_type.lower()] = [
+                        symbol.strip() for symbol in content.split(',') if symbol.strip()
+                    ]
+            except IOError as e:
+                logger.error(f"Error loading symbols for {asset_type}: {str(e)}")
+                self.symbols_by_asset[asset_type.lower()] = []
 
     def on_asset_changed(self, asset_type):
+        """Handle asset type change."""
         try:
             self.current_asset_type = asset_type.upper()
             symbols = self.symbols_by_asset.get(asset_type.lower(), [])
-            self.update_table(symbols)
-            self.load_data()
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to change asset type: {str(e)}")
-            logger.error(f"Error changing asset type: {str(e)}")
-
-    def update_table(self, symbols):
-        self.table_model.clear()
-        headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance"]
-        self.table_model.setHorizontalHeaderLabels(headers)
-        for symbol in symbols:
-            row_items = [QStandardItem(symbol)]
-            for _ in range(len(headers) - 1):
-                row_items.append(QStandardItem(''))
-            self.table_model.appendRow(row_items)
-
-    def calculate_ma(self, df):
-        df['MA20'] = df['Close'].rolling(window=20).mean()
-        df['MA200'] = df['Close'].rolling(window=200).mean()
-        return df
-
-    def find_ma_cross_points(self, df):
-        ma_cross_support = None
-        ma_cross_resistance = None
-        for i in range(len(df) - 1, 0, -1):
-            if df['MA20'].iloc[i] < df['MA200'].iloc[i] and df['MA20'].iloc[i-1] >= df['MA200'].iloc[i-1]:
-                if ma_cross_resistance is None:
-                    ma_cross_resistance = max(df['MA20'].iloc[i], df['MA200'].iloc[i])
-            elif df['MA20'].iloc[i] > df['MA200'].iloc[i] and df['MA20'].iloc[i-1] <= df['MA200'].iloc[i-1]:
-                if ma_cross_support is None:
-                    ma_cross_support = min(df['MA20'].iloc[i], df['MA200'].iloc[i])
             
-            if ma_cross_support is not None and ma_cross_resistance is not None:
-                break
-        return ma_cross_support, ma_cross_resistance
-
-    def update_table_with_data(self, data=None):
-        """Update table with improved number handling."""
-        try:
-            if data is None:
-                data = self.assets
-            is_crypto = self.asset_selector.currentText().lower() == 'crypto'
-            decimal_places = 8 if is_crypto else 2
-
-            for row in range(self.table_model.rowCount()):
-                symbol = self.table_model.item(row, 0).text()
-                if symbol in data:
-                    df = data[symbol]
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        df = self.calculate_ma(df)
-
-                        last_close = df['Close'].iloc[-1]
-                        prev_close = df['Close'].iloc[-2] if len(df) > 1 else last_close
-                        change = last_close - prev_close
-                        change_percent = (change / prev_close) * 100 if prev_close != 0 else 0
-                        volume = df['Volume'].iloc[-1]
-
-                        ma_cross_support, ma_cross_resistance = self.find_ma_cross_points(df)
-
-                        # Set items with both display and sort roles
-                        def set_table_item(col, value, format_str):
-                            try:
-                                if value is None:
-                                    formatted_value = "N/A"
-                                    sort_value = float('-inf')
-                                else:
-                                    formatted_value = format_str.format(value)
-                                    sort_value = float(value)
-
-                                item = QStandardItem(formatted_value)
-                                item.setData(sort_value, Qt.UserRole)
-                                self.table_model.setItem(row, col, item)
-                            except Exception as e:
-                                logger.error(f"Error setting table item: {str(e)}")
-                                item = QStandardItem("N/A")
-                                item.setData(float('-inf'), Qt.UserRole)
-                                self.table_model.setItem(row, col, item)
-
-                        # Set numeric columns with proper formatting
-                        set_table_item(1, last_close, f"{{:.{decimal_places}f}}")
-                        set_table_item(2, change, f"{{:.{decimal_places}f}}")
-                        set_table_item(3, change_percent, "{:.2f}%")
-                        set_table_item(4, volume, "{:.0f}")
-                        set_table_item(5, ma_cross_support, f"{{:.{decimal_places}f}}")
-                        set_table_item(6, ma_cross_resistance, f"{{:.{decimal_places}f}}")
-                    else:
-                        for col in range(1, 7):
-                            item = QStandardItem("N/A")
-                            item.setData(float('-inf'), Qt.UserRole)
-                            self.table_model.setItem(row, col, item)
+            # Update UI
+            self.update_table(symbols)
+            
+            # Clear chart
+            if isinstance(self.chart, LightweightChart):
+                self.chart.reset_state()
+            
+            # Load new data
+            self.load_data()
+            
         except Exception as e:
-            logger.error(f"Error updating table with data: {str(e)}")
+            logger.error(f"Error changing asset type: {str(e)}")
+            self.show_error_message(f"Failed to change asset type: {str(e)}")
 
-    def on_table_click(self, index):
-        symbol = self.proxy_model.data(self.proxy_model.index(index.row(), 0))
-        self.current_symbol = symbol
-        logger.info(f"Selected symbol: {symbol}")
+    def on_timeframe_changed(self, new_timeframe, symbol):
+        """Handle timeframe change."""
+        try:
+            with self._loading_lock:
+                logger.info(f"Processing timeframe change to {new_timeframe} for {symbol}")
+                
+                # Stop existing data loader
+                if self.data_loader_thread and self.data_loader_thread.isRunning():
+                    self.data_loader_thread.stop()
+                    self.data_loader_thread.wait()
+                    self.data_loader_thread.deleteLater()
+                
+                # Create new data loader
+                self.data_loader_thread = DataLoaderThread(
+                    asset_type=self.current_asset_type,
+                    symbols=symbol,
+                    interval=new_timeframe
+                )
+                
+                # Connect signals
+                self.data_loader_thread.data_loaded.connect(
+                    lambda data: self.handle_timeframe_data(data, new_timeframe, symbol)
+                )
+                self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
+                self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
+                
+                # Start loading
+                self.data_loader_thread.start()
+                
+        except Exception as e:
+            logger.error(f"Error handling timeframe change: {str(e)}")
+            self.show_error_message(f"Failed to update timeframe: {str(e)}")
 
-    def on_table_double_click(self, index):
-        symbol = self.proxy_model.data(self.proxy_model.index(index.row(), 0))
-        self.act_on_row(symbol)
-
-    def act_on_row(self, symbol):
-        self.current_symbol = symbol
-        if symbol in self.assets:
-            df = self.assets[symbol]
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                self.update_chart_safely(df, symbol)
-            else:
-                logger.warning(f"No data available for {symbol}")
-                self.show_error_message(f"No data available for {symbol}")
-        else:
-            logger.warning(f"Symbol {symbol} not found in loaded data")
-            self.show_error_message(f"Data for {symbol} not loaded. Please try reloading the data.")
+    def handle_timeframe_data(self, data, timeframe, symbol):
+        """Handle data loaded after timeframe change."""
+        try:
+            if symbol in data:
+                df = data[symbol]
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    # Update cache
+                    self.timeframe_data_cache[f"{symbol}_{timeframe}"] = df
+                    
+                    # Update chart
+                    if isinstance(self.chart, LightweightChart):
+                        self.chart.update_data(df, symbol, timeframe)
+                    
+                    # Update table
+                    self.update_table_with_data({symbol: df})
+                    
+                    logger.info(f"Successfully updated display for {symbol} at {timeframe}")
+                else:
+                    logger.warning(f"No data available for {symbol} at {timeframe}")
+                    self.show_error_message(
+                        f"No data available for {symbol} in {timeframe} timeframe"
+                    )
+        except Exception as e:
+            logger.error(f"Error handling timeframe data: {str(e)}")
+            self.show_error_message("Error updating display with new timeframe data")
 
     def load_data(self):
         """Load data for current asset type."""
@@ -481,58 +468,41 @@ class MainWindow(QMainWindow):
             self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
             self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
             self.data_loader_thread.start()
+            
         except Exception as e:
-            logger.error(f"Error in load_data: {str(e)}")
+            logger.error(f"Error loading data: {str(e)}")
             self.show_error_message(f"Failed to load data: {str(e)}")
 
     def load_data_for_symbol(self, symbol, timeframe):
-        """Load data for a specific symbol and timeframe with improved synchronization."""
+        """Load data for specific symbol and timeframe."""
         try:
             with self._loading_lock:
-                # Reset chart before loading new data
-                with self._chart_update_lock:
-                    if hasattr(self, 'chart') and self.chart:
-                        self.chart.reset_chart()
-                
-                # Clean up existing thread if running
                 if self.data_loader_thread and self.data_loader_thread.isRunning():
                     self.data_loader_thread.stop()
                     self.data_loader_thread.wait()
                     self.data_loader_thread.deleteLater()
 
-                # Create and start new thread
                 self.data_loader_thread = DataLoaderThread(
                     asset_type=self.current_asset_type,
                     symbols=symbol,
                     interval=timeframe
                 )
                 
-                # Connect signals
-                self.data_loader_thread.data_loaded.connect(self.on_symbol_data_loaded)
+                self.data_loader_thread.data_loaded.connect(
+                    lambda data: self.handle_timeframe_data(data, timeframe, symbol)
+                )
                 self.data_loader_thread.progress_updated.connect(self.update_progress_bar)
                 self.data_loader_thread.error_occurred.connect(self.on_data_load_error)
                 
                 self.data_loader_thread.start()
+                logger.info(f"Started loading data for {symbol} at {timeframe}")
                 
         except Exception as e:
-            logger.error(f"Error in load_data_for_symbol: {str(e)}")
-            self.show_error_message(f"Failed to load symbol data: {str(e)}")
-
-
-    def on_data_load_finished(self):
-        """Handle completion of data loading."""
-        try:
-            with self._loading_lock:
-                if self.data_loader_thread:
-                    self.data_loader_thread.deleteLater()
-                    self.data_loader_thread = None
-                self.update_progress_bar("Data load complete", 0, 100)
-        except Exception as e:
-            logger.error(f"Error in on_data_load_finished: {str(e)}")
-
+            logger.error(f"Error loading symbol data: {str(e)}")
+            self.show_error_message(f"Failed to load data for {symbol}")
 
     def on_data_loaded(self, data):
-        """Handle loaded data with improved error handling."""
+        """Handle initial data load."""
         try:
             self.assets = data
             self.update_table_with_data(data)
@@ -542,124 +512,145 @@ class MainWindow(QMainWindow):
             logger.error(f"Error handling loaded data: {str(e)}")
             self.show_error_message("Failed to process loaded data")
 
-
-    def on_symbol_data_loaded(self, data):
-        """Handle loaded symbol data with improved error handling."""
+    def update_chart_safely(self, df, symbol):
+        """Update chart with thread safety."""
         try:
-            with self._loading_lock:
-                if self.current_symbol in data:
-                    df = data[self.current_symbol]
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        # Update chart first
-                        self.update_chart_safely(df, self.current_symbol)
-                        # Then update table
-                        self.update_table_with_data({self.current_symbol: df})
-                    else:
-                        logger.warning(f"Empty DataFrame for symbol: {self.current_symbol}")
-                        self.show_error_message(
-                            f"No data available for {self.current_symbol} with the selected timeframe. "
-                            "Try a different timeframe or symbol."
-                        )
-                        self.update_table_with_data({self.current_symbol: None})
-                else:
-                    logger.warning(f"No data available for symbol: {self.current_symbol}")
-                    self.show_error_message(
-                        f"Failed to load data for {self.current_symbol}. "
-                        "Please try again later or select a different symbol."
-                    )
-                    self.update_table_with_data({self.current_symbol: None})
+            with self._chart_update_lock:
+                if isinstance(self.chart, LightweightChart):
+                    self.chart.update_data(df, symbol, self.current_timeframe)
         except Exception as e:
-            logger.error(f"Error processing loaded symbol data: {str(e)}")
-            self.show_error_message("Error processing loaded data")
+            logger.error(f"Error updating chart: {str(e)}")
+            self.show_error_message(f"Failed to update chart for {symbol}")
+
+    # UI Update Methods
+    def update_table(self, symbols):
+        """Update table with new symbols."""
+        self.table_model.clear()
+        headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance"]
+        self.table_model.setHorizontalHeaderLabels(headers)
+        
+        for symbol in symbols:
+            row_items = [QStandardItem(symbol)]
+            for _ in range(len(headers) - 1):
+                row_items.append(QStandardItem(''))
+            self.table_model.appendRow(row_items)
+
+    def update_table_with_data(self, data):
+        """Update table with market data."""
+        try:
+            if data is None:
+                data = self.assets
+                
+            is_crypto = self.asset_selector.currentText().lower() == 'crypto'
+            decimal_places = 8 if is_crypto else 2
+
+            for row in range(self.table_model.rowCount()):
+                symbol = self.table_model.item(row, 0).text()
+                if symbol in data:
+                    df = data[symbol]
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        self.update_table_row(row, df, decimal_places)
+                    else:
+                        self.clear_table_row(row)
+        except Exception as e:
+            logger.error(f"Error updating table with data: {str(e)}")
+
+    def update_table_row(self, row, df, decimal_places):
+        """Update single table row with data."""
+        try:
+            df = self.calculate_ma(df)
+            
+            last_close = df['Close'].iloc[-1]
+            prev_close = df['Close'].iloc[-2] if len(df) > 1 else last_close
+            change = last_close - prev_close
+            change_percent = (change / prev_close) * 100 if prev_close != 0 else 0
+            volume = df['Volume'].iloc[-1]
+            
+            ma_cross_support, ma_cross_resistance = self.find_ma_cross_points(df)
+            
+            # Set table cells with numeric sorting
+            self.set_table_numeric_cell(row, 1, last_close, f"{{:.{decimal_places}f}}")
+            self.set_table_numeric_cell(row, 2, change, f"{{:.{decimal_places}f}}")
+            self.set_table_numeric_cell(row, 3, change_percent, "{:.2f}%")
+            self.set_table_numeric_cell(row, 4, volume, "{:.0f}")
+            self.set_table_numeric_cell(row, 5, ma_cross_support, f"{{:.{decimal_places}f}}")
+            self.set_table_numeric_cell(row, 6, ma_cross_resistance, f"{{:.{decimal_places}f}}")
+            
+        except Exception as e:
+            logger.error(f"Error updating table row {row}: {str(e)}")
+            self.clear_table_row(row)
+
+    def set_table_numeric_cell(self, row, col, value, format_str):
+        """Set table cell with numeric sorting capability."""
+        try:
+            if value is None or pd.isna(value):
+                formatted_value = "N/A"
+                sort_value = float('-inf')
+            else:
+                formatted_value = format_str.format(value)
+                sort_value = float(value)
+
+            item = QStandardItem(formatted_value)
+            item.setData(sort_value, Qt.UserRole)
+            self.table_model.setItem(row, col, item)
+        except Exception as e:
+            logger.error(f"Error setting table cell [{row},{col}]: {str(e)}")
+            item = QStandardItem("N/A")
+            item.setData(float('-inf'), Qt.UserRole)
+            self.table_model.setItem(row, col, item)
+
+    def clear_table_row(self, row):
+        """Clear all cells in a table row."""
+        for col in range(1, 7):
+            item = QStandardItem("N/A")
+            item.setData(float('-inf'), Qt.UserRole)
+            self.table_model.setItem(row, col, item)
+
+    def calculate_ma(self, df):
+        """Calculate moving averages for dataframe."""
+        df = df.copy()
+        df['MA20'] = df['Close'].rolling(window=20, min_periods=1).mean()
+        df['MA200'] = df['Close'].rolling(window=200, min_periods=1).mean()
+        return df
+
+    def find_ma_cross_points(self, df):
+        """Find MA cross points for support and resistance."""
+        ma_cross_support = None
+        ma_cross_resistance = None
+        
+        for i in range(len(df) - 1, 0, -1):
+            if df['MA20'].iloc[i] < df['MA200'].iloc[i] and df['MA20'].iloc[i-1] >= df['MA200'].iloc[i-1]:
+                if ma_cross_resistance is None:
+                    ma_cross_resistance = max(df['MA20'].iloc[i], df['MA200'].iloc[i])
+            elif df['MA20'].iloc[i] > df['MA200'].iloc[i] and df['MA20'].iloc[i-1] <= df['MA200'].iloc[i-1]:
+                if ma_cross_support is None:
+                    ma_cross_support = min(df['MA20'].iloc[i], df['MA200'].iloc[i])
+            
+            if ma_cross_support is not None and ma_cross_resistance is not None:
+                break
+                
+        return ma_cross_support, ma_cross_resistance
+
     def on_data_load_error(self, error_message):
+        """Handle data loading errors."""
         QMessageBox.critical(self, "Error", f"Failed to load data: {error_message}")
         self.update_progress_bar("Data load failed", 0, 100)
         logger.error(f"Data load error: {error_message}")
 
     def show_error_message(self, message):
+        """Show error message to user."""
         QMessageBox.warning(self, "Data Error", message)
         logger.warning(f"Error message shown: {message}")
 
     def update_progress_bar(self, message, min_value, max_value):
+        """Update progress bar status."""
         self.progress_bar.setFormat(message)
         self.progress_bar.setRange(min_value, max_value)
         if max_value > 0:
             self.progress_bar.setValue(max_value)
 
-    def update_chart_safely(self, df, symbol):
-        """Update chart with improved synchronization and error handling."""
-        logger.info(f"Updating chart for {symbol}")
-        if df is not None and not df.empty:
-            try:
-                df.index = pd.to_datetime(df.index)
-                df = df.sort_index()
-                df = self.calculate_ma(df)
-                logger.info(f"DataFrame prepared for {symbol}: {len(df)} rows")
-                self.chart.set(df, symbol)
-                logger.info(f"Chart update called for {symbol}")
-            except Exception as e:
-                logger.error(f"Error updating chart for {symbol}: {str(e)}", exc_info=True)
-                self.show_error_message(f"Error updating chart for {symbol}. Please try again or select a different timeframe.")
-        else:
-            logger.warning(f"Cannot update chart: Empty or None DataFrame for {symbol}")
-            self.show_error_message(f"No data available to update chart for {symbol}. Please try a different timeframe or symbol.")
-
-    def on_timeframe_changed(self, new_timeframe):
-        """Handle timeframe changes with improved synchronization and validation."""
-        try:
-            with self._loading_lock:
-                logger.info(f"MainWindow received timeframe change: {new_timeframe}")
-                
-                # Validate timeframe change
-                if new_timeframe not in TIMEFRAMES:
-                    logger.error(f"Invalid timeframe received: {new_timeframe}")
-                    return
-                
-                if new_timeframe != self.current_timeframe:
-                    old_timeframe = self.current_timeframe
-                    self.current_timeframe = new_timeframe
-                    
-                    # Clean up existing data and chart
-                    self.cleanup_before_timeframe_change()
-                    
-                    if self.current_symbol and self.current_asset_type:
-                        logger.info(f"Loading new data for {self.current_symbol} with timeframe {new_timeframe}")
-                        self.load_data_for_symbol(self.current_symbol, new_timeframe)
-                    else:
-                        # Reload all data with new timeframe
-                        self.load_data()
-                        
-                    logger.info(f"Timeframe changed from {old_timeframe} to {new_timeframe}")
-        except Exception as e:
-            logger.error(f"Error handling timeframe change in MainWindow: {str(e)}")
-            self.show_error_message(f"Failed to update timeframe: {str(e)}")
-
-    def cleanup_before_timeframe_change(self):
-        """Clean up resources before timeframe change."""
-        try:
-            with self._loading_lock:
-                # Stop any running data loader thread
-                if self.data_loader_thread and self.data_loader_thread.isRunning():
-                    logger.info("Stopping existing data loader thread")
-                    self.data_loader_thread.stop()
-                    self.data_loader_thread.wait()
-                    self.data_loader_thread.deleteLater()
-                    self.data_loader_thread = None
-
-                # Reset chart data
-                with self._chart_update_lock:
-                    if hasattr(self, 'chart') and self.chart:
-                        logger.info("Resetting chart data")
-                        self.chart.reset_chart()
-
-                # Update UI to show loading state
-                self.update_progress_bar("Loading new timeframe data...", 0, 0)
-                
-        except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
-
-
     def search(self):
+        """Search for symbol in table."""
         search_term = self.search_box.text().lower()
         for row in range(self.proxy_model.rowCount()):
             if search_term in self.proxy_model.data(self.proxy_model.index(row, 0)).lower():
@@ -667,7 +658,33 @@ class MainWindow(QMainWindow):
                 return
         QMessageBox.information(self, "Search Result", "No matching symbol found.")
 
+    def on_table_click(self, index):
+        """Handle table row click."""
+        symbol = self.proxy_model.data(self.proxy_model.index(index.row(), 0))
+        self.current_symbol = symbol
+        logger.info(f"Selected symbol: {symbol}")
+
+    def on_table_double_click(self, index):
+        """Handle table row double click."""
+        symbol = self.proxy_model.data(self.proxy_model.index(index.row(), 0))
+        self.act_on_row(symbol)
+
+    def act_on_row(self, symbol):
+        """Handle table row action."""
+        self.current_symbol = symbol
+        if symbol in self.assets:
+            df = self.assets[symbol]
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                self.update_chart_safely(df, symbol)
+            else:
+                logger.warning(f"No data available for {symbol}")
+                self.show_error_message(f"No data available for {symbol}")
+        else:
+            logger.warning(f"Symbol {symbol} not found in loaded data")
+            self.show_error_message(f"Data for {symbol} not loaded. Please try reloading the data.")
+
     def center_on_screen(self):
+        """Center window on screen."""
         screen_geometry = QDesktopWidget().availableGeometry()
         window_geometry = self.frameGeometry()
         center_point = screen_geometry.center()
@@ -675,7 +692,7 @@ class MainWindow(QMainWindow):
         self.move(window_geometry.topLeft())
 
     def closeEvent(self, event):
-        """Handle application close event with improved cleanup."""
+        """Handle application close event."""
         try:
             if self.data_loader_thread and self.data_loader_thread.isRunning():
                 self.data_loader_thread.stop()
@@ -687,6 +704,7 @@ class MainWindow(QMainWindow):
             super().closeEvent(event)
 
     def keyPressEvent(self, event):
+        """Handle key press events."""
         if self.table_view.hasFocus():
             current_index = self.table_view.currentIndex()
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -699,4 +717,4 @@ class MainWindow(QMainWindow):
                 new_index = self.proxy_model.index(min(self.proxy_model.rowCount() - 1, current_index.row() + 1), 0)
                 self.table_view.setCurrentIndex(new_index)
                 self.on_table_click(new_index)
-        super().keyPressEvent(event)
+        super().keyPressEvent(event)          
