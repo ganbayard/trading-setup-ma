@@ -26,17 +26,17 @@ DATABASE_URL = "sqlite:///market_assets.db"
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 
-# Map asset types to their corresponding model classes
+
 ASSET_MODEL_MAP = {
-    'CRYPTO': CryptoMTFBar,
-    'STOCK': StockMTFBar,
-    'FOREX': ForexMTFBar,
-    'COMMODITY': CommodityMTFBar,
-    'INDEX': IndexMTFBar,
-    'FUTURE': FutureMTFBar,
-    'OPTION': OptionMTFBar,
-    'CFD': CFDMTFBar,
-    'BOND': BondMTFBar
+    'CRYPTO'    : CryptoMTFBar,
+    'STOCK'     : StockMTFBar,
+    'FOREX'     : ForexMTFBar,
+    'COMMODITY' : CommodityMTFBar,
+    'INDEX'     : IndexMTFBar,
+    'FUTURE'    : FutureMTFBar,
+    'OPTION'    : OptionMTFBar,
+    'CFD'       : CFDMTFBar,
+    'BOND'      : BondMTFBar
 }
 
 class NumericSortProxyModel(QSortFilterProxyModel):
@@ -45,17 +45,14 @@ class NumericSortProxyModel(QSortFilterProxyModel):
         right_data = self.sourceModel().data(right, Qt.UserRole)
 
         try:
-            # Handle None/NaN values
             if pd.isna(left_data):
                 return False
             if pd.isna(right_data):
                 return True
 
-            # Handle numeric values
             if isinstance(left_data, (int, float)) and isinstance(right_data, (int, float)):
                 return float(left_data) < float(right_data)
 
-            # Try converting strings to float for comparison
             try:
                 return float(str(left_data).replace('%', '')) < float(str(right_data).replace('%', ''))
             except ValueError:
@@ -104,12 +101,11 @@ class DataLoaderThread(QThread):
             if df is None or df.empty:
                 return df
 
-            # Clean numeric columns
+
             numeric_columns = ['Open', 'High', 'Low', 'Close', 'Volume']
             for col in numeric_columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
 
-            # Fill NaN values using ffill() instead of fillna(method='ffill')
             df['Volume'] = df['Volume'].fillna(0)
             df[['Open', 'High', 'Low', 'Close']] = df[['Open', 'High', 'Low', 'Close']].ffill()
 
