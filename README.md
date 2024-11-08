@@ -43,3 +43,18 @@
     Update with custom look-back period:
     python update_market_asset_bar_ib.py --asset-type FOREX --days-back 30
 
+## Market Updater script
+
+    Update all assets with default settings:
+    python market_updater.py
+
+    Update specific stock symbols with custom timeframes:
+    python market_updater.py --asset-type STOCK --symbols AAPL MSFT --timeframes 1min 5min
+
+    Update crypto data for the last 7 days:
+    python market_updater.py --asset-type CRYPTO --days-back 7
+
+    Update all forex data with specific timeframes:
+    python market_updater.py --asset-type FOREX --timeframes 1min 15min 1hour
+
+    
