@@ -325,7 +325,8 @@ class MainWindow(QMainWindow):
     def setup_table_view(self, parent_layout):
         self.table_view = QTableView()
         self.table_model = QStandardItemModel()
-        headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance"]
+        # Update headers to match new requirements
+        headers = ["Symbol", "Last Price", "Change %", "MA Cross Support", "MA Cross Resistance", "Liquidity Status"]
         self.table_model.setHorizontalHeaderLabels(headers)
         
         # Setup proxy model for sorting
@@ -522,7 +523,7 @@ class MainWindow(QMainWindow):
     def update_table(self, symbols):
         """Update table with new symbols."""
         self.table_model.clear()
-        headers = ["Symbol", "Last Price", "Change", "Change %", "Volume", "MA Cross Support", "MA Cross Resistance"]
+        headers = ["Symbol", "Last Price", "Change %", "MA Cross Support", "MA Cross Resistance", "Liquidity Status"]
         self.table_model.setHorizontalHeaderLabels(headers)
         
         for symbol in symbols:
@@ -532,7 +533,7 @@ class MainWindow(QMainWindow):
             self.table_model.appendRow(row_items)
 
     def update_table_with_data(self, data):
-        """Update table with market data."""
+        """Update table with market data including regime calculation."""
         try:
             if data is None:
                 data = self.assets
@@ -552,25 +553,56 @@ class MainWindow(QMainWindow):
             logger.error(f"Error updating table with data: {str(e)}")
 
     def update_table_row(self, row, df, decimal_places):
-        """Update single table row with data."""
+        """Update single table row with regime data."""
         try:
-            df = self.calculate_ma(df)
+            # Calculate all MA-related metrics
+            df = df.copy()
+            df['MA20'] = df['Close'].rolling(window=20, min_periods=1).mean()
+            df['MA200'] = df['Close'].rolling(window=200, min_periods=1).mean()
             
+            # Calculate basic metrics
             last_close = df['Close'].iloc[-1]
             prev_close = df['Close'].iloc[-2] if len(df) > 1 else last_close
-            change = last_close - prev_close
-            change_percent = (change / prev_close) * 100 if prev_close != 0 else 0
-            volume = df['Volume'].iloc[-1]
+            change_percent = ((last_close - prev_close) / prev_close * 100) if prev_close != 0 else 0
             
-            ma_cross_support, ma_cross_resistance = self.find_ma_cross_points(df)
+            # Find MA cross points
+            ma_cross_support = None
+            ma_cross_resistance = None
             
-            # Set table cells with numeric sorting
+            for i in range(len(df) - 1, 0, -1):
+                if df['MA20'].iloc[i] < df['MA200'].iloc[i] and df['MA20'].iloc[i-1] >= df['MA200'].iloc[i-1]:
+                    if ma_cross_resistance is None:
+                        ma_cross_resistance = max(df['MA20'].iloc[i], df['MA200'].iloc[i])
+                elif df['MA20'].iloc[i] > df['MA200'].iloc[i] and df['MA20'].iloc[i-1] <= df['MA200'].iloc[i-1]:
+                    if ma_cross_support is None:
+                        ma_cross_support = min(df['MA20'].iloc[i], df['MA200'].iloc[i])
+                
+                if ma_cross_support is not None and ma_cross_resistance is not None:
+                    break
+            
+            # Determine liquidity status
+            if last_close > df['MA200'].iloc[-1]:
+                if df['MA20'].iloc[-1] > df['MA200'].iloc[-1]:
+                    liquidity_status = "STRONG_BULLISH"
+                else:
+                    liquidity_status = "BULLISH"
+            elif last_close < df['MA200'].iloc[-1]:
+                if df['MA20'].iloc[-1] < df['MA200'].iloc[-1]:
+                    liquidity_status = "STRONG_BEARISH"
+                else:
+                    liquidity_status = "BEARISH"
+            else:
+                liquidity_status = "NEUTRAL"
+            
+            # Update table cells
             self.set_table_numeric_cell(row, 1, last_close, f"{{:.{decimal_places}f}}")
-            self.set_table_numeric_cell(row, 2, change, f"{{:.{decimal_places}f}}")
-            self.set_table_numeric_cell(row, 3, change_percent, "{:.2f}%")
-            self.set_table_numeric_cell(row, 4, volume, "{:.0f}")
-            self.set_table_numeric_cell(row, 5, ma_cross_support, f"{{:.{decimal_places}f}}")
-            self.set_table_numeric_cell(row, 6, ma_cross_resistance, f"{{:.{decimal_places}f}}")
+            self.set_table_numeric_cell(row, 2, change_percent, "{:.2f}%")
+            self.set_table_numeric_cell(row, 3, ma_cross_support, f"{{:.{decimal_places}f}}")
+            self.set_table_numeric_cell(row, 4, ma_cross_resistance, f"{{:.{decimal_places}f}}")
+            
+            # Set liquidity status (non-numeric cell)
+            status_item = QStandardItem(liquidity_status)
+            self.table_model.setItem(row, 5, status_item)
             
         except Exception as e:
             logger.error(f"Error updating table row {row}: {str(e)}")
@@ -597,10 +629,14 @@ class MainWindow(QMainWindow):
 
     def clear_table_row(self, row):
         """Clear all cells in a table row."""
-        for col in range(1, 7):
+        for col in range(1, 5):  # Numeric columns
             item = QStandardItem("N/A")
             item.setData(float('-inf'), Qt.UserRole)
             self.table_model.setItem(row, col, item)
+        
+        # Status column
+        self.table_model.setItem(row, 5, QStandardItem("UNKNOWN"))
+
 
     def calculate_ma(self, df):
         """Calculate moving averages for dataframe."""

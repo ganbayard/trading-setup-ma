@@ -1,7 +1,7 @@
 import logging
 import pandas as pd
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QSizePolicy
-from PyQt5.QtCore import pyqtSignal, QSize
+from PyQt5.QtCore import pyqtSignal, QSize, QTimer
 from lightweight_charts.widgets import QtChart
 from config import TIMEFRAMES
 
@@ -16,20 +16,23 @@ class LightweightChart(QWidget):
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
         
-        # Initialize chart
-        self.chart = QtChart(toolbox=True)
-        self.chart.legend(True)
-        self.chart.topbar.textbox('symbol', '')
-        
-        # State tracking
+        # Initialize state tracking
         self.current_timeframe = TIMEFRAMES[3]  # Default to '1 hour'
         self.current_symbol = None
         self.last_loaded_timeframe = None
-        self.timeframe_state = {tf: False for tf in TIMEFRAMES}  # Track loaded state for each timeframe
+        self.timeframe_state = {tf: False for tf in TIMEFRAMES}
         
-        # Initialize chart components
-        self.init_timeframe_switcher()
-        self.init_moving_averages()
+        # Initialize line references
+        self.ma20_line = None
+        self.ma200_line = None
+        self.support_line = None
+        self.resistance_line = None
+        
+        # Initialize chart
+        self.chart = QtChart(toolbox=True)
+        
+        # Add small delay to ensure chart is fully initialized
+        QTimer.singleShot(100, self.initialize_chart_components)
         
         # Add webview to layout
         self.webview = self.chart.get_webview()
@@ -38,7 +41,18 @@ class LightweightChart(QWidget):
             self.webview.setMinimumSize(QSize(800, 600))
         self.layout.addWidget(self.webview)
         
-        logger.info("LightweightChart initialized")
+        logger.info("LightweightChart base initialization completed")
+
+    def initialize_chart_components(self):
+        """Initialize chart components after brief delay"""
+        try:
+            self.chart.legend(True)
+            self.chart.topbar.textbox('symbol', '')
+            self.init_timeframe_switcher()
+            self.init_moving_averages()
+            logger.info("Chart components initialized successfully")
+        except Exception as e:
+            logger.error(f"Error initializing chart components: {str(e)}")
 
     def init_timeframe_switcher(self):
         """Initialize timeframe switcher with state management."""
@@ -82,20 +96,78 @@ class LightweightChart(QWidget):
                 'MA20',
                 color='#00FF00',
                 width=1,
-                price_label=True,
-                price_line=False
+                price_line=False,
+                price_label=True
             )
             self.ma200_line = self.chart.create_line(
                 'MA200',
                 color='#FF0000',
                 width=1,
-                price_label=True,
-                price_line=False
+                price_line=False,
+                price_label=True
             )
             logger.info("Moving average lines initialized")
         except Exception as e:
             logger.error(f"Error initializing MA lines: {str(e)}")
             self.ma20_line = self.ma200_line = None
+
+    def _reset_chart_completely(self):
+        """Complete reset of chart, removing all indicators and lines."""
+        try:
+            # Remove all existing lines and clear references
+            if hasattr(self.chart, 'lines'):
+                # Create a copy of the lines list to avoid modification during iteration
+                lines = self.chart.lines.copy()
+                for line in lines:
+                    try:
+                        # Force line removal from chart
+                        self.chart.remove_line(line)
+                        line.remove()
+                    except Exception as e:
+                        logger.error(f"Error removing line {line.name}: {str(e)}")
+
+            # Reset all references to None
+            self.ma20_line = None
+            self.ma200_line = None
+            self.support_line = None
+            self.resistance_line = None
+
+            # Force a chart update
+            if self.webview:
+                self.webview.update()
+
+            # Reinitialize moving averages after cleanup
+            self.init_moving_averages()
+
+        except Exception as e:
+            logger.error(f"Error in complete chart reset: {str(e)}")
+
+    def _clear_all_lines(self):
+        """Clear all lines from the chart."""
+        try:
+            if hasattr(self.chart, 'lines'):
+                # Get list of existing lines
+                existing_lines = []
+                for line in self.chart.lines:
+                    existing_lines.append(line)
+                
+                # Remove each line
+                for line in existing_lines:
+                    try:
+                        self.chart.remove_line(line)
+                    except Exception as e:
+                        logger.error(f"Error removing line: {str(e)}")
+            
+            self.ma20_line = None
+            self.ma200_line = None
+            self.support_line = None
+            self.resistance_line = None
+            
+            if self.webview:
+                self.webview.update()
+                
+        except Exception as e:
+            logger.error(f"Error clearing lines: {str(e)}")
 
     def update_data(self, df, symbol, timeframe):
         """Update chart data with new timeframe data."""
@@ -104,60 +176,119 @@ class LightweightChart(QWidget):
                 logger.warning(f"Received empty data for {symbol} at {timeframe}")
                 return
 
+            # Clear all existing lines first
+            self._clear_all_lines()
+
             # Store current data and symbol
             self.current_symbol = symbol
-            
-            # Prepare data
+
             df = df.copy()
             df.index = pd.to_datetime(df.index)
             df = df.sort_index()
             
+            # Set main chart data first
+            self.chart.set(df)
+            self.chart.topbar['symbol'].set(symbol)
+            
             # Calculate moving averages
             df['MA20'] = df['Close'].rolling(window=20, min_periods=1).mean()
             df['MA200'] = df['Close'].rolling(window=200, min_periods=1).mean()
-            
-            # Update symbol display
-            self.chart.topbar['symbol'].set(symbol)
-            
-            # Set main chart data
-            self.chart.set(df)
-            logger.info(f"Updated chart with {len(df)} bars for {symbol} at {timeframe}")
-            
-            # Update MA lines
-            if hasattr(self, 'ma20_line') and hasattr(self, 'ma200_line'):
+
+            # Create MA lines
+            if not self.ma20_line:
+                self.ma20_line = self.chart.create_line(
+                    'MA20',
+                    color='#00FF00',
+                    width=1
+                )
+
+            if not self.ma200_line:
+                self.ma200_line = self.chart.create_line(
+                    'MA200',
+                    color='#FF0000',
+                    width=1
+                )
+
+            # Update MA line data
+            if self.ma20_line:
                 ma20_data = pd.DataFrame({
                     'time': df.index,
                     'MA20': df['MA20']
                 }).dropna()
-                
+                self.ma20_line.set(ma20_data)
+            
+            if self.ma200_line:
                 ma200_data = pd.DataFrame({
                     'time': df.index,
                     'MA200': df['MA200']
                 }).dropna()
-                
-                if not ma20_data.empty:
-                    self.ma20_line.set(ma20_data)
-                    logger.info(f"Updated MA20 with {len(ma20_data)} points")
-                
-                if not ma200_data.empty:
-                    self.ma200_line.set(ma200_data)
-                    logger.info(f"Updated MA200 with {len(ma200_data)} points")
+                self.ma200_line.set(ma200_data)
+
+            # Find MA cross points
+            ma_cross_support = None
+            ma_cross_resistance = None
             
+            for i in range(len(df) - 1, 0, -1):
+                if df['MA20'].iloc[i] < df['MA200'].iloc[i] and df['MA20'].iloc[i-1] >= df['MA200'].iloc[i-1]:
+                    if ma_cross_resistance is None:
+                        ma_cross_resistance = max(df['MA20'].iloc[i], df['MA200'].iloc[i])
+                elif df['MA20'].iloc[i] > df['MA200'].iloc[i] and df['MA20'].iloc[i-1] <= df['MA200'].iloc[i-1]:
+                    if ma_cross_support is None:
+                        ma_cross_support = min(df['MA20'].iloc[i], df['MA200'].iloc[i])
+                
+                if ma_cross_support is not None and ma_cross_resistance is not None:
+                    break
+
+            # Create and update support/resistance lines
+            if ma_cross_support is not None:
+                if not self.support_line:
+                    self.support_line = self.chart.create_line(
+                        'Support',
+                        color='#00FFFF',
+                        width=1
+                    )
+                
+                if self.support_line:
+                    support_data = pd.DataFrame({
+                        'time': df.index,
+                        'Support': [float(ma_cross_support)] * len(df.index)
+                    })
+                    self.support_line.set(support_data)
+
+            if ma_cross_resistance is not None:
+                if not self.resistance_line:
+                    self.resistance_line = self.chart.create_line(
+                        'Resistance',
+                        color='#FF69B4',
+                        width=1
+                    )
+                
+                if self.resistance_line:
+                    resistance_data = pd.DataFrame({
+                        'time': df.index,
+                        'Resistance': [float(ma_cross_resistance)] * len(df.index)
+                    })
+                    self.resistance_line.set(resistance_data)
+
             # Update state
             self.timeframe_state[timeframe] = True
             self.last_loaded_timeframe = timeframe
             
-            # Ensure view updates
+            # Force final update
             if self.webview:
                 self.webview.update()
                 
             logger.info(f"Successfully updated chart for {symbol} at {timeframe}")
         except Exception as e:
             logger.error(f"Error updating chart data: {str(e)}")
+            self._clear_all_lines()
 
     def clear_data(self):
         """Clear all chart data."""
         try:
+            # Clear all lines first
+            self._clear_all_lines()
+            
             # Create empty DataFrame
             empty_df = pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
             empty_df.index.name = 'time'
@@ -165,18 +296,12 @@ class LightweightChart(QWidget):
             # Clear main chart
             self.chart.set(empty_df)
             
-            # Clear MA lines
-            if hasattr(self, 'ma20_line'):
-                self.ma20_line.set(pd.DataFrame({'time': [], 'MA20': []}))
-            if hasattr(self, 'ma200_line'):
-                self.ma200_line.set(pd.DataFrame({'time': [], 'MA200': []}))
-            
             # Reset state
             self.current_symbol = None
             self.last_loaded_timeframe = None
             self.timeframe_state = {tf: False for tf in TIMEFRAMES}
             
-            # Update view
+            # Force update
             if self.webview:
                 self.webview.update()
                 
@@ -188,7 +313,6 @@ class LightweightChart(QWidget):
         """Reset chart state for new data loading."""
         try:
             self.clear_data()
-            self.init_moving_averages()
             logger.info("Chart state reset")
         except Exception as e:
             logger.error(f"Error resetting chart state: {str(e)}")
